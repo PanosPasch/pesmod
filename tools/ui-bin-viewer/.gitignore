@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Vite / React build output
+dist/
+.vite/
+.vite-cache/
+
+# Test and coverage output
+coverage/
+playwright-report/
+test-results/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+
+# TypeScript incremental cache, if TS is added later
+*.tsbuildinfo

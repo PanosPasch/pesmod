@@ -1,0 +1,502 @@
+//------------------------------------------------
+//--- 010 Editor Binary Template
+//
+//      File: Generalized UI BIN structs (PES5/PES6 UI layout binaries)
+//   Project: PESMod
+//   Version: 1.0
+//------------------------------------------------
+#ifndef UI_BIN_GENERALIZED_BT
+#define UI_BIN_GENERALIZED_BT
+#include "common/include.h"
+
+typedef u32 ptr_t;
+
+typedef struct
+{
+    ptr_t ptr;
+    if (ptr != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(ptr);
+        string data;
+        FSeek(temp);
+    }
+} ptr_char_t;
+
+typedef struct
+{
+    u32 texture_count <name = "Texture Count">;
+    ptr_t texture_names <name = "Texture Name Pointer Table">;
+
+    if (texture_names != 0 && texture_count != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(texture_names);
+        ptr_char_t texture_name[texture_count] <name = "Texture Name">;
+        FSeek(temp);
+    }
+} UiTextureDesc <name = "UiTextureDesc">;
+
+typedef struct
+{
+    ptr_t ptr;
+    if (ptr != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(ptr);
+        UiTextureDesc data;
+        FSeek(temp);
+    }
+} ptr_UiTextureDesc_t;
+
+typedef struct
+{
+    u8 draw_count <name = "Draw Count">;
+    u8 mode1_count <name = "Mode 1 Count">;
+    u8 helper_count <name = "Helper Count">;
+    u8 count_flags_03 <name = "Count Flags 0x03">;
+    ptr_t draw_records <name = "Draw Records">;
+    ptr_t mode1_records <name = "Mode 1 Records">;
+    ptr_t helper_records <name = "Helper Records">;
+    u32 flags_10 <name = "Flags 0x10">;
+} UiSectionHeader <name = "UiSectionHeader">;
+
+typedef struct
+{
+    ptr_t ptr;
+    if (ptr != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(ptr);
+        UiSectionHeader data;
+        FSeek(temp);
+    }
+} ptr_UiSectionHeader_t;
+
+typedef struct
+{
+    u8 record_type <name = "Record Type">;
+    u8 texture_slot <name = "Texture Slot">;
+    u16 record_id <name = "Record ID">;
+    s16 x_q4 <name = "X / 16">;
+    s16 y_q4 <name = "Y / 16">;
+    s16 neg_depth <name = "Negated Depth">;
+    s16 width_q4 <name = "Width / 16">;
+    s16 height_q4 <name = "Height / 16">;
+    s16 u0_q12 <name = "U0 / 4096">;
+    s16 v0_q12 <name = "V0 / 4096">;
+    s16 u1_q12 <name = "U1 / 4096">;
+    s16 v1_q12 <name = "V1 / 4096">;
+    s16 u2_q12 <name = "U2 / 4096">;
+    s16 v2_q12 <name = "V2 / 4096">;
+    s16 u3_q12 <name = "U3 / 4096">;
+    s16 v3_q12 <name = "V3 / 4096">;
+    u8 color0_rgba[4] <name = "Color 0 RGBA">;
+    u8 color1_rgba[4] <name = "Color 1 RGBA">;
+    u8 color2_rgba[4] <name = "Color 2 RGBA">;
+    u8 color3_rgba[4] <name = "Color 3 RGBA">;
+} UiMainRecordRaw <name = "UiMainRecordRaw">;
+
+typedef struct
+{
+    u8 helper_type <name = "Helper Type">;
+    u8 bank_or_slot <name = "Bank / Slot">;
+    u16 helper_id <name = "Helper ID">;
+    s16 x_q4 <name = "X / 16">;
+    s16 y_q4 <name = "Y / 16">;
+    s16 neg_depth <name = "Negated Depth">;
+    s16 width_q4 <name = "Width / 16">;
+    s16 height_q4 <name = "Height / 16">;
+} UiTailRecordRaw <name = "UiTailRecordRaw">;
+
+typedef struct
+{
+    u8 record_type <name = "Record Type">;
+    u8 bank_or_slot <name = "Bank / Slot">;
+    u16 record_id <name = "Record ID">;
+    s16 x_q4 <name = "X / 16">;
+    s16 y_q4 <name = "Y / 16">;
+    s16 neg_depth <name = "Negated Depth">;
+    s16 width_q4 <name = "Width / 16">;
+    s16 height_q4 <name = "Height / 16">;
+    u8 color0_rgba[4] <name = "Color 0 RGBA">;
+    u8 color1_rgba[4] <name = "Color 1 RGBA">;
+    u8 color2_rgba[4] <name = "Color 2 RGBA">;
+    u8 color3_rgba[4] <name = "Color 3 RGBA">;
+} UiMode1RecordRaw <name = "UiMode1RecordRaw">;
+
+typedef struct
+{
+    UiSectionHeader header <name = "Header">;
+
+    if (header.draw_records != 0 && header.draw_count != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(header.draw_records);
+        UiMainRecordRaw draw_record[header.draw_count] <name = "Draw Record">;
+        FSeek(temp);
+    }
+
+    if (header.mode1_records != 0 && header.mode1_count != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(header.mode1_records);
+        UiMode1RecordRaw mode1_record[header.mode1_count] <name = "Mode 1 Record">;
+        FSeek(temp);
+    }
+
+    if (header.helper_records != 0 && header.helper_count != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(header.helper_records);
+        UiTailRecordRaw helper_record[header.helper_count] <name = "Helper Record">;
+        FSeek(temp);
+    }
+} UiSectionBundle <name = "UiSectionBundle">;
+
+typedef struct
+{
+    ptr_t ptr;
+    if (ptr != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(ptr);
+        UiSectionBundle data;
+        FSeek(temp);
+    }
+} ptr_UiSectionBundle_t;
+
+typedef struct
+{
+    u32 section_count <name = "Section Count">;
+    ptr_t sections <name = "Section Pointer Table">;
+
+    if (sections != 0 && section_count != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(sections);
+        ptr_UiSectionBundle_t section[section_count] <name = "Section">;
+        FSeek(temp);
+    }
+} UiSectionDir <name = "UiSectionDir">;
+
+typedef struct
+{
+    ptr_t ptr;
+    if (ptr != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(ptr);
+        UiSectionDir data;
+        FSeek(temp);
+    }
+} ptr_UiSectionDir_t;
+
+typedef struct
+{
+    s16 x_q4 <name = "X / 16">;
+    s16 y_q4 <name = "Y / 16">;
+    s16 z_raw <name = "Z Raw">;
+    s16 w_raw <name = "W Raw">;
+} UiRichVec4Raw <name = "UiRichVec4Raw">;
+
+typedef struct
+{
+    s16 x_q4 <name = "X / 16">;
+    s16 y_q4 <name = "Y / 16">;
+    s16 z_raw <name = "Z Raw">;
+} UiRichVec3Raw <name = "UiRichVec3Raw">;
+
+typedef struct
+{
+    u8 flags00 <name = "Flags 0x00">;
+    u8 strip_cull_flag <name = "Strip Cull Flag">;
+    u8 has_vertex_colors <name = "Has Vertex Colors">;
+    u8 texture_slot <name = "Texture Slot">;
+    u16 vertex_count <name = "Vertex Count">;
+    u8 base_color[4] <name = "Base Color">;
+    UiRichVec3Raw local_offset <name = "Local Offset">;
+    ptr_t positions <name = "Positions">;
+    ptr_t uvs <name = "UVs">;
+    ptr_t colors <name = "Colors">;
+
+    if (positions != 0 && vertex_count != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(positions);
+        UiRichVec3Raw position[vertex_count] <name = "Position">;
+        FSeek(temp);
+    }
+
+    if (uvs != 0 && vertex_count != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(uvs);
+        s16 uv_q12[vertex_count][2] <name = "UV / 4096">;
+        FSeek(temp);
+    }
+
+    if (colors != 0 && has_vertex_colors != 0 && vertex_count != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(colors);
+        u8 vertex_color[vertex_count][4] <name = "Vertex Color">;
+        FSeek(temp);
+    }
+} UiRichMesh <name = "UiRichMesh">;
+
+typedef struct
+{
+    ptr_t ptr;
+    if (ptr != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(ptr);
+        UiRichMesh data;
+        FSeek(temp);
+    }
+} ptr_UiRichMesh_t;
+
+typedef struct
+{
+    u8 type <name = "Type">;
+    u8 texture_slot <name = "Texture Slot">;
+    u8 flags02 <name = "Flags 0x02">;
+    u8 flags03 <name = "Flags 0x03">;
+    UiRichVec4Raw transform <name = "Transform">;
+    u8 mode0E <name = "Mode 0x0E">;
+    u8 palette_index <name = "Palette Index">;
+    u16 attachment_id <name = "Attachment ID">;
+    u16 field12 <name = "Field 0x12">;
+    u32 lookup_key <name = "Lookup Key">;
+} UiRichAttachmentRecord <name = "UiRichAttachmentRecord">;
+
+typedef struct
+{
+    u8 type <name = "Type">;
+    u8 field01 <name = "Field 0x01">;
+    u16 control_id <name = "Control ID">;
+    s16 x_q4 <name = "X / 16">;
+    s16 y_q4 <name = "Y / 16">;
+    s16 neg_depth <name = "Negated Depth">;
+    s16 width_q4 <name = "Width / 16">;
+    s16 height_q4 <name = "Height / 16">;
+} UiRichControlRecord <name = "UiRichControlRecord">;
+
+typedef struct
+{
+    u8 mesh_count <name = "Mesh Count">;
+    u8 attachment_count <name = "Attachment Count">;
+    u8 control_count <name = "Control Count">;
+    u8 field03 <name = "Field 0x03">;
+    UiRichVec4Raw origin <name = "Origin">;
+    ptr_t meshes <name = "Mesh Pointer Table">;
+    ptr_t attachments <name = "Attachment Records">;
+    ptr_t controls <name = "Control Records">;
+
+    if (meshes != 0 && mesh_count != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(meshes);
+        ptr_UiRichMesh_t mesh[mesh_count] <name = "Mesh">;
+        FSeek(temp);
+    }
+
+    if (attachments != 0 && attachment_count != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(attachments);
+        UiRichAttachmentRecord attachment[attachment_count] <name = "Attachment">;
+        FSeek(temp);
+    }
+
+    if (controls != 0 && control_count != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(controls);
+        UiRichControlRecord control[control_count] <name = "Control">;
+        FSeek(temp);
+    }
+} UiRichSubresource <name = "UiRichSubresource">;
+
+typedef struct
+{
+    ptr_t ptr;
+    if (ptr != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(ptr);
+        UiRichSubresource data;
+        FSeek(temp);
+    }
+} ptr_UiRichSubresource_t;
+
+typedef struct
+{
+    u32 subresource_count <name = "Subresource Count">;
+    ptr_t subresources <name = "Subresource Pointer Table">;
+
+    if (subresources != 0 && subresource_count != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(subresources);
+        ptr_UiRichSubresource_t subresource[subresource_count] <name = "Subresource">;
+        FSeek(temp);
+    }
+} UiRichSubresourceBank <name = "UiRichSubresourceBank">;
+
+typedef struct
+{
+    u16 subresource_index <name = "Subresource Index">;
+    u16 frame_flags <name = "Frame Flags">;
+} UiRichAssetFrame <name = "UiRichAssetFrame">;
+
+typedef struct
+{
+    u16 frame_count <name = "Frame Count">;
+    u8 field02 <name = "Field 0x02">;
+    u8 texture_slot_count <name = "Texture Slot Count">;
+    ptr_t frames <name = "Frames">;
+    ptr_t texture_slots <name = "Texture Slots">;
+
+    if (frames != 0 && frame_count != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(frames);
+        UiRichAssetFrame frame[frame_count] <name = "Frame">;
+        FSeek(temp);
+    }
+
+    if (texture_slots != 0 && texture_slot_count != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(texture_slots);
+        u16 texture_slot[texture_slot_count] <name = "Texture Slot">;
+        FSeek(temp);
+    }
+} UiRichAssetEntry <name = "UiRichAssetEntry">;
+
+typedef struct
+{
+    ptr_t ptr;
+    if (ptr != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(ptr);
+        UiRichAssetEntry data;
+        FSeek(temp);
+    }
+} ptr_UiRichAssetEntry_t;
+
+typedef struct
+{
+    u32 asset_count <name = "Asset Count">;
+    ptr_t assets <name = "Asset Pointer Table">;
+
+    if (assets != 0 && asset_count != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(assets);
+        ptr_UiRichAssetEntry_t asset[asset_count] <name = "Asset">;
+        FSeek(temp);
+    }
+} UiRichAssetBank <name = "UiRichAssetBank">;
+
+typedef struct
+{
+    ptr_UiTextureDesc_t texture_desc <name = "Texture Descriptor">;
+    if (texture_desc.ptr != 0)
+    {
+        u32 extra_root[(texture_desc.ptr / 4) - 1] <name = "Extra Root Pointer">;
+    }
+} UiRootGeneric <name = "UiRootGeneric">;
+
+typedef struct
+{
+    u32 lookup_key <name = "Lookup Key">;
+    u32 resolved_handle <name = "Resolved Handle">;
+} UiResolvedTexture <name = "UiResolvedTexture">;
+
+typedef struct
+{
+    ptr_t ptr;
+    if (ptr != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(ptr);
+        UiResolvedTexture data;
+        FSeek(temp);
+    }
+} ptr_UiResolvedTexture_t;
+
+typedef struct
+{
+    ptr_t prev <name = "Previous Pointer">;
+    ptr_t next <name = "Next Pointer">;
+    u32 resource_id <name = "Resource ID">;
+    ptr_t blob <name = "Blob Pointer">;
+    ptr_UiSectionDir_t section_dir <name = "Section Directory">;
+    ptr_t texture_cache <name = "Texture Cache Pointer">;
+    u32 user_count <name = "User Count">;
+    ptr_t user_list_head <name = "User List Head Pointer">;
+    ptr_t user_list_tail <name = "User List Tail Pointer">;
+} UiLayoutWrapper <name = "UiLayoutWrapper">;
+
+typedef struct
+{
+    ptr_t ptr;
+    if (ptr != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(ptr);
+        UiLayoutWrapper data;
+        FSeek(temp);
+    }
+} ptr_UiLayoutWrapper_t;
+
+typedef struct
+{
+    ptr_t prev <name = "Previous Pointer">;
+    ptr_t next <name = "Next Pointer">;
+    u32 unk08 <name = "Unknown 0x08">;
+    u32 unk0C <name = "Unknown 0x0C">;
+    u32 current_section_id <name = "Current Section ID">;
+    ptr_UiSectionHeader_t current_section <name = "Current Section">;
+    ptr_UiLayoutWrapper_t wrapper <name = "Wrapper">;
+} UiLayoutInstance <name = "UiLayoutInstance">;
+
+typedef struct
+{
+    UiRootGeneric root <name = "Root">;
+
+    if ((root.texture_desc.ptr / 4) > 1 && root.extra_root[0] != 0)
+    {
+        local u32 temp = FTell();
+        FSeek(root.extra_root[0]);
+        UiSectionDir section_dir <name = "Section Directory">;
+        FSeek(temp);
+    }
+
+    if ((root.texture_desc.ptr / 4) > 3)
+    {
+        if (root.extra_root[0] != 0)
+        {
+            local u32 temp = FTell();
+            FSeek(root.extra_root[0]);
+            UiRichSubresourceBank rich_subresources <name = "Rich Subresources">;
+            FSeek(temp);
+        }
+
+        if (root.extra_root[1] != 0)
+        {
+            local u32 temp = FTell();
+            FSeek(root.extra_root[1]);
+            UiRichAssetBank rich_assets <name = "Rich Assets">;
+            FSeek(temp);
+        }
+    }
+} UiLayoutFile <name = "UiLayoutFile">;
+
+UiLayoutFile file <name = "UI Layout File">;
+
+#endif /* UI_BIN_GENERALIZED_BT */

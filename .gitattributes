@@ -1,0 +1,23 @@
+# Normalise line endings: store text as LF in the repo, check out native.
+* text=auto
+
+# Source and docs are always text.
+*.cpp   text
+*.h     text
+*.md    text
+*.ini   text
+*.txt   text
+*.cmake text
+*.bt    text
+*.js    text
+*.jsx   text
+*.css   text
+*.html  text
+*.json  text
+
+# Binary assets — never normalise.
+*.dll   binary
+*.lib   binary
+*.exp   binary
+*.png   binary
+*.bin   binary

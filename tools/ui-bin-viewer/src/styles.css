@@ -1,0 +1,539 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #e9edf3;
+  background: #111318;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+input,
+button {
+  font: inherit;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: minmax(300px, 360px) 1fr;
+  min-height: 100vh;
+  background: #111318;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+  max-height: 100vh;
+  padding: 14px;
+  border-right: 1px solid #29313c;
+  background: #171b22;
+}
+
+.panel {
+  padding: 14px;
+  border: 1px solid #303946;
+  border-radius: 8px;
+  background: #1d232c;
+}
+
+h1,
+h2,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  margin-bottom: 14px;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+h2 {
+  margin-bottom: 10px;
+  font-size: 14px;
+  line-height: 1.25;
+  color: #aeb9c8;
+  text-transform: uppercase;
+}
+
+.file-picker,
+.texture-row {
+  display: grid;
+  gap: 8px;
+}
+
+.file-picker span,
+.texture-row span {
+  color: #cfd7e3;
+}
+
+input[type="file"] {
+  width: 100%;
+  color: #cfd7e3;
+}
+
+input[type="file"]::file-selector-button {
+  margin-right: 10px;
+  padding: 7px 10px;
+  border: 1px solid #495464;
+  border-radius: 6px;
+  color: #f6f8fb;
+  background: #2b3440;
+  cursor: pointer;
+}
+
+.controls {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-bottom: 12px;
+  padding: 3px;
+  border: 1px solid #3c4654;
+  border-radius: 8px;
+  background: #141a22;
+}
+
+.segmented-control button {
+  min-width: 0;
+  padding: 7px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #aeb9c8;
+  background: transparent;
+  cursor: pointer;
+}
+
+.segmented-control button.active,
+.segmented-control button:hover {
+  border-color: #5a7291;
+  color: #f4f8ff;
+  background: #2b3645;
+}
+
+.controls div {
+  display: grid;
+  grid-template-columns: 86px 1fr;
+  align-items: center;
+  gap: 10px;
+}
+
+.controls dt {
+  padding: 4px 6px;
+  border: 1px solid #4a5564;
+  border-radius: 6px;
+  text-align: center;
+  color: #fff;
+  background: #252d38;
+}
+
+.controls dd {
+  margin: 0;
+  color: #b8c2cf;
+}
+
+.texture-panel {
+  gap: 12px;
+}
+
+.texture-row {
+  padding: 10px 0;
+  border-top: 1px solid #303946;
+}
+
+.texture-row strong {
+  display: inline-block;
+  min-width: 34px;
+  color: #f2d46f;
+}
+
+.debug-panel pre {
+  overflow: auto;
+  max-height: 250px;
+  margin: 0;
+  padding: 10px;
+  border-radius: 6px;
+  color: #dce5f1;
+  background: #10141a;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.primary-button {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid #6f8fc2;
+  border-radius: 6px;
+  color: #f7fbff;
+  background: #315f9f;
+  cursor: pointer;
+}
+
+.primary-button:disabled {
+  border-color: #46505d;
+  color: #8d98a6;
+  background: #28313b;
+  cursor: not-allowed;
+}
+
+.action-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.action-row button {
+  padding: 7px 8px;
+  border: 1px solid #52647b;
+  border-radius: 6px;
+  color: #edf3fb;
+  background: #25303c;
+  cursor: pointer;
+}
+
+.action-row button:hover {
+  border-color: #6f8fc2;
+  background: #314057;
+}
+
+.save-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+}
+
+.element-editor {
+  display: grid;
+  gap: 8px;
+}
+
+.element-tree {
+  display: grid;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.tree-node {
+  border-top: 1px solid #303946;
+  padding-top: 6px;
+}
+
+.tree-node:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.tree-group {
+  display: grid;
+  gap: 4px;
+  margin: 6px 0 8px 12px;
+}
+
+.tree-row {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr) 46px;
+  gap: 5px;
+  align-items: center;
+}
+
+.tree-row.hidden {
+  opacity: 0.48;
+}
+
+.tree-row.selected .tree-item,
+.tree-row .tree-item:hover,
+.tree-row .tree-icon-button:hover {
+  border-color: #4c627d;
+  background: #25303c;
+}
+
+.tree-item,
+.tree-icon-button {
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #d5deea;
+  background: transparent;
+  cursor: pointer;
+}
+
+.tree-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 7px;
+  text-align: left;
+}
+
+.tree-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-item strong {
+  color: #8794a4;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.tree-icon-button {
+  padding: 5px 4px;
+  color: #aeb9c8;
+  font-size: 10px;
+}
+
+.tree-icon-spacer {
+  width: 58px;
+}
+
+.info-line,
+.number-field,
+.text-field {
+  display: grid;
+  grid-template-columns: minmax(92px, 1fr) minmax(0, 110px);
+  align-items: center;
+  gap: 10px;
+}
+
+.info-line span,
+.number-field span,
+.text-field span {
+  color: #aeb9c8;
+  font-size: 12px;
+}
+
+.info-line strong {
+  overflow: hidden;
+  color: #f0f4fa;
+  font-size: 12px;
+  text-overflow: ellipsis;
+}
+
+.number-field input,
+.text-field input {
+  min-width: 0;
+  width: 100%;
+  padding: 6px 7px;
+  border: 1px solid #46515f;
+  border-radius: 6px;
+  color: #edf3fb;
+  background: #121820;
+}
+
+.text-field {
+  grid-template-columns: minmax(92px, 1fr) minmax(0, 150px);
+}
+
+.rich-array-editor,
+.array-item {
+  display: grid;
+  gap: 8px;
+}
+
+.array-item {
+  padding: 8px;
+  border: 1px solid #303946;
+  border-radius: 6px;
+  background: #111820;
+}
+
+.color-grid,
+.alpha-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.color-grid label {
+  display: grid;
+  gap: 5px;
+  color: #aeb9c8;
+  font-size: 12px;
+}
+
+.color-grid input {
+  width: 100%;
+  height: 32px;
+  padding: 0;
+  border: 1px solid #46515f;
+  border-radius: 6px;
+  background: transparent;
+}
+
+.alpha-grid {
+  grid-template-columns: 1fr 1fr;
+}
+
+.alpha-grid .number-field {
+  grid-template-columns: 28px 1fr;
+}
+
+.uv-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.uv-canvas {
+  position: relative;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border: 1px solid #46515f;
+  border-radius: 6px;
+  background: #10151c;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+}
+
+.uv-canvas span {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  color: #f2d46f;
+  text-align: center;
+  word-break: break-word;
+}
+
+.uv-canvas svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+.uv-canvas polygon {
+  fill: rgba(102, 217, 239, 0.22);
+  stroke: #66d9ef;
+  stroke-width: 0.008;
+  vector-effect: non-scaling-stroke;
+}
+
+.uv-canvas circle {
+  fill: #f2d46f;
+  stroke: #111318;
+  stroke-width: 0.008;
+  cursor: grab;
+  vector-effect: non-scaling-stroke;
+}
+
+.uv-canvas circle:active {
+  cursor: grabbing;
+}
+
+.uv-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.viewport,
+.scene-wrap {
+  position: relative;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+.scene-wrap canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+}
+
+.scene-wrap canvas:active {
+  cursor: grabbing;
+}
+
+.empty-state {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  max-width: 520px;
+  margin: auto;
+  padding: 24px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.empty-state h2 {
+  color: #f3f6fb;
+  font-size: 26px;
+  text-transform: none;
+}
+
+.empty-state p,
+.muted {
+  color: #9ba7b6;
+}
+
+.scene-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  padding: 3px 6px;
+  border: 1px solid #445062;
+  border-radius: 5px;
+  color: #f7f9fc;
+  background: rgba(17, 19, 24, 0.78);
+  font-size: 11px;
+  line-height: 1.2;
+  pointer-events: none;
+  transform-origin: left top;
+  white-space: nowrap;
+}
+
+.section-label {
+  color: #f2d46f;
+}
+
+.helper-label {
+  color: #ffe596;
+}
+
+.draw-label {
+  color: #cce5ff;
+}
+
+.error-text {
+  margin: 10px 0 0;
+  color: #ff9a9a;
+}
+
+@media (max-width: 840px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    max-height: none;
+    border-right: none;
+    border-bottom: 1px solid #29313c;
+  }
+
+  .viewport,
+  .scene-wrap {
+    min-height: 70vh;
+  }
+}

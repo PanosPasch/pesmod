@@ -1,0 +1,78 @@
+# Build directories
+/build/
+/out/
+/dist/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+Testing/
+compile_commands.json
+
+# Visual Studio / MSVC generated files
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.opensdf
+*.sdf
+*.suo
+*.user
+*.userosscache
+*.VC.db
+*.VC.opendb
+ipch/
+x64/
+x86/
+Win32/
+Debug/
+Release/
+RelWithDebInfo/
+MinSizeRel/
+
+# C/C++ build products
+*.obj
+*.o
+*.lib
+*.exp
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.idb
+*.res
+*.manifest
+
+# ...except the vendored MinHook binaries, which are required to build
+# and to run (MinHook.x86.lib is an import lib for MinHook.x86.dll).
+!include/MinHook/lib/MinHook.x86.lib
+!include/MinHook/lib/MinHook.x86.dll
+
+# Vite / Node viewer
+node_modules/
+tools/ui-bin-viewer/dist/
+tools/ui-bin-viewer/.vite/
+tools/ui-bin-viewer/.vite-cache/
+
+# Logs and local diagnostics
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+
+# Local environment files
+.env
+.env.*
+!.env.example
