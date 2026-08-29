@@ -762,13 +762,24 @@ static int16_t LeaguePageControlIdFromTable(uintptr_t table, int side, int page)
         + (side * 3 + page) * sizeof(uint32_t));
 }
 
-static bool ApplyControlRectOverride(int slot, float* rect)
+static bool ApplyControlRectOverride(uint32_t parentNode, int slot, float* rect)
 {
     const PanelSlotLayout* layout = GetLeaguePanelLayout(slot);
     if (!layout || !layout->has_control_rect) return false;
 
-    if (layout->has_control_x)      rect[0] = layout->control_x;
-    if (layout->has_control_y)      rect[1] = layout->control_y;
+    // The OPD control x/y are LOCAL offsets: GetRichControlWorldRect returns
+    // (parent node's world position + local), and it is the node position that
+    // shifts the away-side grid to the right. Apply the INI x/y in that same
+    // local space (node position + override) so overridden controls inherit
+    // the side offset too, instead of pinning an absolute screen position.
+    // Width/height carry no node offset (they are sizes), so INI values there
+    // are used as-is. Base stays (0,0) if the node has no position, in which
+    // case the override degrades to the old absolute behaviour.
+    float base[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    if (parentNode) GetRichNodePosition()(parentNode, base);
+
+    if (layout->has_control_x)      rect[0] = base[0] + layout->control_x;
+    if (layout->has_control_y)      rect[1] = base[1] + layout->control_y;
     if (layout->has_control_width)  rect[2] = layout->control_width;
     if (layout->has_control_height) rect[3] = layout->control_height;
     return true;
@@ -1092,7 +1103,7 @@ static void UpsertLeagueVisualSlot(uint32_t* panel, int slot)
                                       static_cast<int16_t>(controlId)) != nullptr;
     }
 
-    const bool hadOverride = ApplyControlRectOverride(slot, rect);
+    const bool hadOverride = ApplyControlRectOverride(parent, slot, rect);
     if (!haveRect && !hadOverride) {
         Logger::Log("[PanelV2] visual slot %d skipped: control id %d "
                     "not found on parent=0x%08X",
@@ -1152,10 +1163,17 @@ void UpdateExtraLeagueVisualSlotVisibility(uint32_t* panel)
 {
     if (!panel) return;
 
-    Logger::Log("[VIS] Ran Visibility Func");
-    const int currentPage = *reinterpret_cast<int*>(PanelBytes(panel) + 0x00F8);
-
-    Logger::Log("[VIS] Current Page: %d", currentPage);
+    // The extra logo quads (slots >= 20) live outside the stock panel[+0x98..]
+    // node array, so the refresh's stock show/hide pass never touches them.
+    // The league list is ONE scrolling list — every league logo is visible
+    // while browsing (regardless of the cursor's page) and only hidden in
+    // team-selection mode (the chosen league's clubs take over the grid).
+    // So mirror the stock pass exactly: use the same enable byte (panel[+0x44])
+    // in league mode, 0 in team mode. This also keeps an inactive/away panel's
+    // extras hidden, because its stock nodes (and thus this byte-driven pass)
+    // are already hidden in that state.
+    const bool    teamMode = *reinterpret_cast<int*>(PanelBytes(panel) + 0x190C) != 0;
+    const uint8_t enable   = teamMode ? 0 : *(PanelBytes(panel) + 0x44);
 
     for (auto& entry : g_ExtraVisualSlotNodes) {
         if (entry.panel != panel) continue;
@@ -1163,12 +1181,7 @@ void UpdateExtraLeagueVisualSlotVisibility(uint32_t* panel)
         for (int i = 0; i < static_cast<int>(entry.nodes.size()); ++i) {
             const uint32_t node = entry.nodes[i];
             if (!node) continue;
-
-            const int slot = 20 + i;
-            const int slotPage = slot / SLOTS_PER_LEAGUE_PAGE;
-             Logger::Log("[VIS] Slot/SlotPage: %d/%d", slot, slotPage);
-            SetUiNodeEnabled()(reinterpret_cast<uint32_t*>(node),
-                               slotPage == currentPage ? 1 : 0);
+            SetUiNodeEnabled()(reinterpret_cast<uint32_t*>(node), enable);
         }
         return;
     }

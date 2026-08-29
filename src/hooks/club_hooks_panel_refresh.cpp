@@ -193,7 +193,15 @@ void RebuildLeagueSelection(uint32_t* panel) {
 
     if (PIN(panel, 0x1904) == 1) {
         const int slot = SelectedSlot(panel);
-        const int page = PIN(panel, 0xF8);
+        // Only 3 physical page-header buffers exist (pages 0/1/2). Every league
+        // slot >= 20 renders on the page-2 node (ParentNodeForLeagueSlot clamps
+        // page >= 2 -> 2), so its name belongs on the page-2 header. Without
+        // this clamp, currentPage 3+ writes PAST the 3 buffers into a lower
+        // page's default-name template (0xFC + page*0x400 aliases
+        // PageNameBuf(page-3) + 0xC00), which then leaks onto that page's header
+        // on the next refresh.
+        int page = PIN(panel, 0xF8);
+        if (page > 2) page = 2;
         GameStrNCpy(reinterpret_cast<char*>(PageNameBuf(panel, page)),
                     reinterpret_cast<char*>(SlotName(panel, slot)), 0x400);
     }
@@ -329,9 +337,12 @@ void RebuildTeamSelection(uint32_t* panel) {
     }
 
     // Per-player marker enable: for each player's item, if the player's
-    // selected slot matches this cursor's slot AND the item's stored z equals
-    // the sentinel float (0x00B82ED4) AND the player's flag == 1, enable with
-    // f44; otherwise disable. Mirrors the stock fp-compare at 0x00B08FC4.
+    // selected slot matches this cursor's slot AND the item's stored z is a
+    // real on-screen position (NOT the off-screen sentinel float 0x00B82ED4)
+    // AND the player's flag == 1, enable with f44; otherwise disable. Mirrors
+    // the stock fp-compare + jnp at 0x00B08FC4: pos[2] == sentinel takes the
+    // DISABLE branch, so the enable case is the inequality (which also covers
+    // the unordered/NaN case, exactly as jnp does).
     for (int k = 0; k < 2; ++k) {
         uint32_t* item = reinterpret_cast<uint32_t*>(PDW(panel, 0x58 + k * 4));
         const int cmpSlot = PIN(panel, 0x1914 + k * 0x18);   // player k selected slot
@@ -340,7 +351,7 @@ void RebuildTeamSelection(uint32_t* panel) {
             float pos[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
             GetItemRect(item, pos);
             const int playerFlag = PIN(panel, 0x1918 + k * 0x18);
-            if (pos[2] == FloatConst_B82ED4() && playerFlag == 1)
+            if (pos[2] != FloatConst_B82ED4() && playerFlag == 1)
                 enable = f44;
         }
         if (fn_InitDisplayItem) fn_InitDisplayItem(item, enable);
@@ -380,6 +391,13 @@ uint32_t __cdecl hook_PanelRefresh(void** subObj) {
             RebuildLeagueSelection(panel);
         else
             RebuildTeamSelection(panel);
+
+        // The stock rebuilds above only show/hide the 20 stock logo nodes at
+        // panel[+0x98..]. The extra logo quads (slots >= 20) live in a sidecar
+        // array, so mirror the same show/hide here — visible while browsing
+        // leagues, hidden in team mode — otherwise they draw in every state
+        // (including after a league is chosen).
+        UpdateExtraLeagueVisualSlotVisibility(panel);
     }
 
     PIN(panel, 0x48) = 0;
