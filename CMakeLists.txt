@@ -27,6 +27,7 @@ set(SOURCES
     src/hooks/club_hooks_panel.cpp
     src/hooks/club_hooks_panel_v2.cpp
     src/hooks/club_hooks_panel_nav.cpp
+    src/hooks/club_hooks_panel_refresh.cpp
     src/hooks/club_hooks_leagues.cpp
     src/hooks/club_hooks_register.cpp
     src/hooks/league_teams_hook.cpp

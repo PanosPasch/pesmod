@@ -118,6 +118,10 @@ FN_LoadTeamData_EditedKit fn_LoadTeamData_EditedKit = nullptr;
 // Original trampolines
 FN_DestroyPanel_t orig_DestroyPanel = nullptr;
 FN_PanelNavUpdate_t orig_PanelNavUpdate = nullptr;
+// Trampoline for FUN_00b08b40. hook_PanelRefresh fully reimplements the
+// original and never calls back through this pointer — it is declared only
+// because MH_CreateHook needs a slot to write the trampoline address into.
+FN_PanelRefresh_t orig_PanelRefresh = nullptr;
 FN_SetTeamList_t orig_SetTeamList = nullptr;
 FN_BuildLeaguePanelVisualSlots_t orig_BuildLeaguePanelVisualSlots = nullptr;
 // Trampolines for FUN_00950580 / FUN_00b0fcd0. Both hooks fully
@@ -363,6 +367,17 @@ void ClubHooks::Register()
                  hook_BuildLeaguePanelVisualSlots_Naked,
                  orig_BuildLeaguePanelVisualSlots,
                  "BuildLeaguePanelVisualSlots");
+
+    // FUN_00b08b40 — PanelRefresh (display sub-object refresh callback).
+    // Full replacement: the LEAGUE branch positions the selection cursor from
+    // the fixed 20/side seat control-id table (0x00E86130), which has no entry
+    // for slots >= 20, so the cursor collapsed to screen centre over extra
+    // league slots. We resolve the same control id the logo uses and clamp the
+    // page-node index. See club_hooks_panel_refresh.cpp.
+    INSTALL_HOOK(0x00b08b40,
+                 hook_PanelRefresh,
+                 orig_PanelRefresh,
+                 "PanelRefresh");
 
     // FUN_00b0ac50 — DestroyPanel
     // Hooked to read subObj from the correct dynamic trailer offset

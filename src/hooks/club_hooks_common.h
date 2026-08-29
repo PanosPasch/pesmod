@@ -606,6 +606,10 @@ typedef uint32_t*(__cdecl  *FN_CreateLeagueSelectionPanel_t)(uint32_t*, uint32_t
 typedef void     (__cdecl  *FN_BuildLeaguePanelVisualSlots_t)();
 typedef void     (__cdecl  *FN_DestroyPanel_t)            (uint32_t*);
 typedef uint32_t (__cdecl  *FN_PanelNavUpdate_t)          (uint32_t*);
+// FUN_00b08b40 — the panel refresh callback (installed as the display
+// sub-object's "vtable" in the panel creator's Step 2). Called as
+// FUN_00b08b40(subObj) with subObj[0] = panel. See club_hooks_panel_refresh.cpp.
+typedef uint32_t (__cdecl  *FN_PanelRefresh_t)            (void**);
 typedef void     (__cdecl  *FN_SetTeamList_t)             (int, int, int);
 typedef void     (__cdecl  *FN_LoadBothTeamKitData_t)    (int slotIndex);
 typedef uint32_t (__cdecl  *FN_ExtractKitColor_t)        (char*, uint16_t, int, int, int);
@@ -650,6 +654,7 @@ extern FN_CreateLeagueSelectionPanel_t orig_CreateLeagueSelectionPanel;
 extern FN_BuildLeaguePanelVisualSlots_t orig_BuildLeaguePanelVisualSlots;
 extern FN_DestroyPanel_t             orig_DestroyPanel;
 extern FN_PanelNavUpdate_t           orig_PanelNavUpdate;
+extern FN_PanelRefresh_t             orig_PanelRefresh;
 extern FN_SetTeamList_t              orig_SetTeamList;
 extern FN_LoadBothTeamKitData_t      orig_LoadBothTeamKitData;
 extern FN_ExtractKitColor_t          orig_ExtractKitColor;
@@ -747,6 +752,11 @@ uint32_t* __cdecl hook_CreateLeagueSelectionPanel_v2(uint32_t* param_1,
                                                       float*    param_3);
 void     __cdecl  hook_BuildLeaguePanelVisualSlots_C(uint32_t* panel);
 void              hook_BuildLeaguePanelVisualSlots_Naked();
+// FUN_00b08b40 full replacement — see club_hooks_panel_refresh.cpp. Fixes the
+// selection cursor for league slots >= 20 (stock uses the fixed 20/side seat
+// control-id table; we resolve the same id the logo uses and clamp the page
+// node). subObj[0] is the panel pointer.
+uint32_t __cdecl  hook_PanelRefresh           (void** subObj);
 void     __cdecl  hook_DestroyPanel            (uint32_t* param_1);
 uint32_t __cdecl  hook_PanelNavUpdate         (uint32_t* panel);
 void     __cdecl  hook_SetTeamList            (int param_1, int param_2, int param_3);
