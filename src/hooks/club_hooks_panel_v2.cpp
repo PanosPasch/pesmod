@@ -1147,6 +1147,31 @@ static void UpsertLeagueVisualSlot(uint32_t* panel, int slot)
 
 } // namespace
 
+// Exposed for the selection-cursor path (club_hooks_panel_refresh.cpp) so the
+// cursor applies the same INI control-rect override the logo quads do — without
+// it the cursor tracks the raw OPD control while the logo follows the override.
+bool ApplyLeagueControlRectOverride(uint32_t parentNode, int slot, float* rect)
+{
+    return ApplyControlRectOverride(parentNode, slot, rect);
+}
+
+// Companion for the cursor's "scale" (really its Z-depth). GetBoneScale returns
+// (control depth + subres depth) + node Z; SetItemScale writes it to the item's
+// depth fields. The INI knob is control_depth. Mirror the x/y override: node Z
+// (GetRichNodePosition[2]) + INI depth, so the override is a node-relative
+// depth offset. No-op when the slot has no control_depth override.
+bool ApplyLeagueControlDepthOverride(uint32_t parentNode, int slot, float* scale)
+{
+    if (!scale) return false;
+    const PanelSlotLayout* layout = GetLeaguePanelLayout(slot);
+    if (!layout || !layout->has_control_depth) return false;
+
+    float base[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    if (parentNode) GetRichNodePosition()(parentNode, base);
+    *scale = base[2] + layout->control_depth;
+    return true;
+}
+
 void ClearExtraLeagueVisualSlotNodes(uint32_t* panel)
 {
     for (auto it = g_ExtraVisualSlotNodes.begin();

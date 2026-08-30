@@ -209,7 +209,7 @@ static inline int PanelTrailerB_DwordIdx(int slotCount) {
 struct TeamSlotBuffer
 {
     int32_t teamIDs[TEAM_SLOT_COUNT];           // [+0x000] 20 slots × 4 bytes = 0x50
-    uint8_t _pad[0xA0 - 0x50];                  // [+0x050] 0x50 bytes gap
+    uint8_t _pad[0xA0 - 0x50 - ((TEAM_SLOT_COUNT - 20) * 4)];  // [+0x050] 0x50 bytes gap
     char    name[0x400];                         // [+0x0A0] league name
     int32_t displayID;                           // [+0x4A0] logo/display ID
 };
@@ -968,3 +968,16 @@ void ClearExtraLeagueVisualSlotNodes(uint32_t* panel);
 // show/hide pass. Call this whenever panel[+0xF8] (current league page)
 // can change.
 void UpdateExtraLeagueVisualSlotVisibility(uint32_t* panel);
+
+// Owned by club_hooks_panel_v2.cpp. Applies the leagues/<n>.ini
+// control_x/y/width/height override for `slot` onto a world rect from
+// GetRichControlWorldRect, using `parentNode` for the node base (so x/y act as
+// node-relative offsets that inherit the away-side shift). Returns true if an
+// override was applied. Shared by the logo builder and the selection cursor.
+bool ApplyLeagueControlRectOverride(uint32_t parentNode, int slot, float* rect);
+
+// Owned by club_hooks_panel_v2.cpp. Applies the leagues/<n>.ini control_depth
+// override onto the cursor's "scale" value (GetBoneScale returns the control's
+// Z-depth; SetItemScale writes the item's depth), using `parentNode` for the
+// node Z base. Returns true if an override was applied.
+bool ApplyLeagueControlDepthOverride(uint32_t parentNode, int slot, float* scale);

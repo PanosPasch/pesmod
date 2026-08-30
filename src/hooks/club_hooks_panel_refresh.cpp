@@ -237,9 +237,19 @@ void RebuildLeagueSelection(uint32_t* panel) {
         if (fn_GetBoneWorldPos)
             fn_GetBoneWorldPos(static_cast<int>(pageNode), rect, controlId);
 
+        // Follow the same leagues/<n>.ini control-rect override the logo quad
+        // uses, so the cursor tracks overridden (incl. away-side offset)
+        // positions instead of the raw OPD control. No-op when the slot has no
+        // override.
+        ApplyLeagueControlRectOverride(pageNode, slot, rect);
+
         float scale = 0.0f;
         if (fn_GetBoneScale)
             scale = fn_GetBoneScale(static_cast<int>(pageNode), controlId);
+
+        // Follow the leagues/<n>.ini control_depth override for the cursor's
+        // depth ("scale" here is the item Z, not a size). No-op without one.
+        ApplyLeagueControlDepthOverride(pageNode, slot, &scale);
 
         SetItemRect(reinterpret_cast<uint32_t*>(PDW(panel, 0x60)), rect);
         if (fn_SetItemScale)
