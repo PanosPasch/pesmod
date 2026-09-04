@@ -671,6 +671,12 @@ extern FN_BadgeRender_t              orig_BadgeRender;
 // FUN_00b0fa80 — clean __cdecl sibling of the badge render (nodeStruct, teamId).
 typedef void (__cdecl *FN_BadgeRenderCdecl_t)(int nodeStruct, int teamId);
 extern FN_BadgeRenderCdecl_t         orig_BadgeRenderCdecl;
+// FUN_009b0390 — teamId -> atlas slot (records the team for the shared setter).
+typedef int (__cdecl *FN_ComputeBadgeSlot_t)(int state, uint16_t teamId);
+extern FN_ComputeBadgeSlot_t         orig_ComputeBadgeSlot;
+// FUN_00b0f8b0 — shared badge-texture setter (nodeStruct in EDI). Naked thunk.
+typedef void (*FN_BadgeSet_t)();
+extern FN_BadgeSet_t                 orig_BadgeSet;
 extern FN_SetTeamList_t              orig_SetTeamList;
 extern FN_LoadBothTeamKitData_t      orig_LoadBothTeamKitData;
 extern FN_ExtractKitColor_t          orig_ExtractKitColor;
@@ -793,6 +799,9 @@ int      __cdecl  hook_CrestResolve          (int scratchId, uint16_t teamId, in
 extern "C" void          hook_BadgeRender_Naked();
 extern "C" int  __cdecl  hook_BadgeRender_C  (int teamIdRaw, int nodeStruct, int param_1);
 void     __cdecl  hook_BadgeRenderCdecl      (int nodeStruct, int teamId);
+int      __cdecl  hook_ComputeBadgeSlot      (int state, uint16_t teamId);
+extern "C" void          hook_BadgeSet_Naked();
+extern "C" int  __cdecl  hook_BadgeSet_C     (int nodeStruct);
 
 // FUN_00969610 hook — see club_hooks_kit_data.cpp.
 // extern "C" because the naked thunk references the cdecl handler in inline

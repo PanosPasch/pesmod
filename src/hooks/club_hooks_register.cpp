@@ -133,6 +133,10 @@ FN_CrestResolve_t orig_CrestResolve = nullptr;
 FN_BadgeRender_t orig_BadgeRender = nullptr;
 // Trampoline for FUN_00b0fa80 (clean __cdecl sibling of the badge render).
 FN_BadgeRenderCdecl_t orig_BadgeRenderCdecl = nullptr;
+// Trampolines for the shared badge-render choke points (FUN_009b0390 team->slot,
+// FUN_00b0f8b0 shared texture setter) that cover the rest of the render family.
+FN_ComputeBadgeSlot_t orig_ComputeBadgeSlot = nullptr;
+FN_BadgeSet_t orig_BadgeSet = nullptr;
 FN_SetTeamList_t orig_SetTeamList = nullptr;
 FN_BuildLeaguePanelVisualSlots_t orig_BuildLeaguePanelVisualSlots = nullptr;
 // Trampolines for FUN_00950580 / FUN_00b0fcd0. Both hooks fully
@@ -406,6 +410,19 @@ void ClubHooks::Register()
                  hook_BadgeRenderCdecl,
                  orig_BadgeRenderCdecl,
                  "BadgeRenderCdecl");
+
+    // FUN_009b0390 — records the team id for the shared badge setter below.
+    INSTALL_HOOK(0x009b0390,
+                 hook_ComputeBadgeSlot,
+                 orig_ComputeBadgeSlot,
+                 "ComputeBadgeSlot");
+
+    // FUN_00b0f8b0 — shared badge-texture setter; draws teams/<id>.png for the
+    // custom slot 0x1ca. Covers the render family the two hooks above don't.
+    INSTALL_HOOK(0x00b0f8b0,
+                 hook_BadgeSet_Naked,
+                 orig_BadgeSet,
+                 "BadgeSet");
 
     // FUN_00b08b40 — PanelRefresh (display sub-object refresh callback).
     // Full replacement: the LEAGUE branch positions the selection cursor from

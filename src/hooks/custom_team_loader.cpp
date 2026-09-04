@@ -155,8 +155,6 @@ const auto SetNodeEnabled      = reinterpret_cast<FN_SetNodeEnabled>     (0x0095
 bool DrawCustomBadge(int nodeStruct, int teamIdRaw)
 {
     const int teamId = teamIdRaw & 0xFFFF;
-    { static int dn = 0; if (dn < 40 && teamId >= 0x200) { ++dn;
-        Logger::Log("[BadgeCall] team=%d node=0x%08X", teamId, nodeStruct); } }
     if (teamId == 0xFFFF || nodeStruct == 0)
         return false;
 
@@ -231,5 +229,51 @@ extern "C" __declspec(naked) void hook_BadgeRender_Naked()
     handled:
         add  esp, 8                     // discard saved teamId + nodeStruct
         ret                             // plain ret (caller cleans param_1)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Shared-setter fallback — covers the rest of the badge-render family
+// (FUN_00b0fb40 / FUN_00b0fbc0 / FUN_00b0fde0), some of which receive a
+// pre-computed slot and so never expose the team id. They all funnel through:
+//   FUN_009b0390(state, teamId)  — turns the team id into an atlas slot
+//   FUN_00b0f8b0(texState, slot) — sets the badge texture from that slot
+// We record the team in the first and, when the second is asked for the custom
+// slot 0x1ca, draw teams/<team>.png instead. The club-selection hooks above
+// already short-circuit before FUN_00b0f8b0, so there is no double draw.
+// -----------------------------------------------------------------------------
+namespace { int g_lastBadgeTeam = 0xFFFF; }
+
+// FUN_009b0390(state, teamId) — clean __cdecl. Record the team, forward through.
+int __cdecl hook_ComputeBadgeSlot(int state, uint16_t teamId)
+{
+    g_lastBadgeTeam = teamId;
+    return orig_ComputeBadgeSlot ? orig_ComputeBadgeSlot(state, teamId) : 0;
+}
+
+// Body for the FUN_00b0f8b0 thunk: draw the custom badge onto EDI's nodeStruct.
+extern "C" int __cdecl hook_BadgeSet_C(int nodeStruct)
+{
+    return DrawCustomBadge(nodeStruct, g_lastBadgeTeam) ? 1 : 0;
+}
+
+// Naked bridge for FUN_00b0f8b0(texState /*[esp+4]*/, slot /*[esp+8]*/) with
+// nodeStruct in EDI, plain RET. Only the custom slot 0x1ca is intercepted; all
+// other slots (and custom teams without a PNG) run the original untouched.
+extern "C" __declspec(naked) void hook_BadgeSet_Naked()
+{
+    __asm
+    {
+        cmp  dword ptr [esp + 8], 0x1ca     // slot == custom sentinel?
+        jne  passthrough
+        push edi                            // nodeStruct (EDI is callee-saved)
+        call hook_BadgeSet_C
+        add  esp, 4
+        test eax, eax
+        jz   passthrough
+        mov  eax, 1                         // handled -> "texture set"
+        ret
+    passthrough:
+        jmp  dword ptr [orig_BadgeSet]
     }
 }
