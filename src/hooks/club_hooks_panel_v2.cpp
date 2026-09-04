@@ -1089,6 +1089,10 @@ static void UpsertLeagueVisualSlot(uint32_t* panel, int slot)
     const int displayId = SlotDisplayId(panel, slot);
     if (displayId == -1) return;
 
+    // Custom logo: if leagues/<slot>.png exists, build+register a texture under
+    // this display id (once) so the resolve below picks it up. No-op otherwise.
+    EnsureCustomLeagueLogo(slot, displayId);
+
     const int texture = ResolveDisplayTexture()(displayId);
     if (texture == 0) return;
 
@@ -1215,6 +1219,10 @@ void UpdateExtraLeagueVisualSlotVisibility(uint32_t* panel)
 void __cdecl hook_BuildLeaguePanelVisualSlots_C(uint32_t* panel)
 {
     if (!panel) return;
+
+    // Give slots with a leagues/<slot>.png but no logo id a synthetic id first,
+    // so the visibility / selectable passes below treat them as populated.
+    AssignSyntheticLogoIds(panel);
 
     const int side = PanelSide(panel);
     LeagueSelectableCountRef(panel) = 0;

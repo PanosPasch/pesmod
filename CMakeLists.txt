@@ -28,6 +28,8 @@ set(SOURCES
     src/hooks/club_hooks_panel_v2.cpp
     src/hooks/club_hooks_panel_nav.cpp
     src/hooks/club_hooks_panel_refresh.cpp
+    src/hooks/custom_logo_loader.cpp
+    src/hooks/custom_team_loader.cpp
     src/hooks/club_hooks_leagues.cpp
     src/hooks/club_hooks_register.cpp
     src/hooks/league_teams_hook.cpp
@@ -45,9 +47,11 @@ target_include_directories(PESMod PRIVATE
     include
 )
  
-# ── Link MinHook static library ──────────────────────────────────────────
+# ── Link MinHook static library + Windows Imaging (WIC) for PNG decode ────
 target_link_libraries(PESMod PRIVATE
     ${CMAKE_SOURCE_DIR}/include/MinHook/lib/MinHook.x86.lib
+    windowscodecs   # WIC (IWICImagingFactory) — custom logo PNG decode
+    ole32           # CoCreateInstance / CoInitializeEx
 )
  
 # ── Output as .asi (not .dll) ────────────────────────────────────────────

@@ -614,6 +614,13 @@ typedef void     (__cdecl  *FN_SetTeamList_t)             (int, int, int);
 typedef void     (__cdecl  *FN_LoadBothTeamKitData_t)    (int slotIndex);
 typedef uint32_t (__cdecl  *FN_ExtractKitColor_t)        (char*, uint16_t, int, int, int);
 typedef bool     (__cdecl  *FN_IsTeamKitEdited_t)        (uint16_t);
+// FUN_00863570 — GetTeamName(teamId, nameType, param3): full/short team name.
+typedef char*    (__cdecl  *FN_GetTeamName_t)           (uint16_t, int, int);
+// FUN_00b3beb0 — CrestResolve(scratchId, teamId, p3, p4): loads a team's crest
+// into a scratch texture id (0x7346..0x73ef) and returns the registry node; the
+// caller copies the 32x32 8bpp palette+pixels into its cell struct then releases
+// the scratch (FUN_00b3be00). A 0 result makes the cell draw the white flag.
+typedef int      (__cdecl  *FN_CrestResolve_t)          (int, uint16_t, int, int);
 
 // FUN_00969610 — LoadTeamKitDataBySlot. Inner per-side kit loader.
 // Takes an implicit side-index parameter in EAX, plus two cdecl args.
@@ -655,6 +662,15 @@ extern FN_BuildLeaguePanelVisualSlots_t orig_BuildLeaguePanelVisualSlots;
 extern FN_DestroyPanel_t             orig_DestroyPanel;
 extern FN_PanelNavUpdate_t           orig_PanelNavUpdate;
 extern FN_PanelRefresh_t             orig_PanelRefresh;
+extern FN_GetTeamName_t              orig_GetTeamName;
+extern FN_CrestResolve_t             orig_CrestResolve;
+// FUN_00b0f990 — club-selection badge render (ECX=teamId, EAX=nodeStruct). We
+// hook it with a naked thunk to draw teams/<ID>.png for custom teams.
+typedef void (*FN_BadgeRender_t)();
+extern FN_BadgeRender_t              orig_BadgeRender;
+// FUN_00b0fa80 — clean __cdecl sibling of the badge render (nodeStruct, teamId).
+typedef void (__cdecl *FN_BadgeRenderCdecl_t)(int nodeStruct, int teamId);
+extern FN_BadgeRenderCdecl_t         orig_BadgeRenderCdecl;
 extern FN_SetTeamList_t              orig_SetTeamList;
 extern FN_LoadBothTeamKitData_t      orig_LoadBothTeamKitData;
 extern FN_ExtractKitColor_t          orig_ExtractKitColor;
@@ -765,6 +781,18 @@ uint32_t __cdecl  hook_ExtractKitColor       (char* outRGBA, uint16_t teamID,
                                                int kitVariant, int colorPartType,
                                                int sideIndex);
 bool     __cdecl  hook_IsTeamKitEdited       (uint16_t teamID);
+// FUN_00863570 hook — custom team name/short name from teams/<ID>.ini.
+// See custom_team_loader.cpp.
+char*    __cdecl  hook_GetTeamName           (uint16_t teamId, int nameType, int param3);
+// FUN_00b3beb0 hook — custom team crest from teams/<ID>.png.
+// See custom_team_loader.cpp.
+int      __cdecl  hook_CrestResolve          (int scratchId, uint16_t teamId, int p3, int p4);
+
+// FUN_00b0f990 hook — custom club badge from teams/<ID>.png. The naked thunk is
+// what MinHook patches in; hook_BadgeRender_C is the body. See custom_team_loader.cpp.
+extern "C" void          hook_BadgeRender_Naked();
+extern "C" int  __cdecl  hook_BadgeRender_C  (int teamIdRaw, int nodeStruct, int param_1);
+void     __cdecl  hook_BadgeRenderCdecl      (int nodeStruct, int teamId);
 
 // FUN_00969610 hook — see club_hooks_kit_data.cpp.
 // extern "C" because the naked thunk references the cdecl handler in inline
@@ -981,3 +1009,38 @@ bool ApplyLeagueControlRectOverride(uint32_t parentNode, int slot, float* rect);
 // Z-depth; SetItemScale writes the item's depth), using `parentNode` for the
 // node Z base. Returns true if an override was applied.
 bool ApplyLeagueControlDepthOverride(uint32_t parentNode, int slot, float* scale);
+
+// Owned by custom_logo_loader.cpp. If `leagues/<slot>.png` exists, decode it,
+// build a .txs-format texture blob under `displayId`, and register it into the
+// resolver registry — once per id. Call just before ResolveDisplayTexture so a
+// custom PNG overrides the (otherwise missing) baked graphic for that slot.
+void EnsureCustomLeagueLogo(int slot, int displayId);
+
+// Owned by custom_logo_loader.cpp. Stamps a synthetic display id into any panel
+// slot that has a `leagues/<slot>.png` but no assigned logo id (-1), so the slot
+// becomes populated and its PNG can draw. Call at the very start of the visual-
+// slot build, before visibility / selectable-count passes read the ids.
+void AssignSyntheticLogoIds(uint32_t* panel);
+
+// Owned by custom_logo_loader.cpp. Releases all custom textures registered this
+// screen and clears the caches so the next entry rebuilds them fresh (the stock
+// texture unload never touches ours). Call at the start of the screen init.
+void UnloadCustomLeagueLogos();
+
+// Owned by custom_logo_loader.cpp. Decodes `pngPath`, builds a .txs-format
+// texture blob and registers it under `displayId` (once per screen, tracked for
+// unload). Returns true if a texture is available under displayId afterwards.
+// Shared by league logos (leagues/<n>.png) and team emblems (teams/<id>.png).
+bool RegisterCustomPng(int displayId, const wchar_t* pngPath);
+
+// Owned by custom_logo_loader.cpp. For a team that has a teams/<id>.png, decode
+// it once (forced to 32x32 8bpp, cached per team) and register a FRESH blob
+// under `scratchId` — the transient crest slot FUN_00b3beb0 uses. Returns the
+// registry node (as int) for the caller to hand back, or 0 to fall back to the
+// stock loader. Not tracked for unload: the game releases the scratch per use.
+int RegisterCustomCrest(int scratchId, int teamId);
+
+// Owned by custom_logo_loader.cpp. Register teams/<id>.png (once per screen,
+// tracked for unload like a league logo) and return its texture registry node
+// for the club-selection badge nodes, or 0 if the team has no custom emblem.
+int GetCustomEmblemNode(int teamId);

@@ -122,6 +122,17 @@ FN_PanelNavUpdate_t orig_PanelNavUpdate = nullptr;
 // original and never calls back through this pointer — it is declared only
 // because MH_CreateHook needs a slot to write the trampoline address into.
 FN_PanelRefresh_t orig_PanelRefresh = nullptr;
+// Trampoline for FUN_00863570 (GetTeamName) — hook_GetTeamName forwards
+// non-custom ids through it.
+FN_GetTeamName_t orig_GetTeamName = nullptr;
+// Trampoline for FUN_00b3beb0 (CrestResolve) — hook_CrestResolve forwards
+// teams without a teams/<ID>.png through it.
+FN_CrestResolve_t orig_CrestResolve = nullptr;
+// Trampoline for FUN_00b0f990 (club badge render). The naked thunk tail-jmps
+// here for non-custom teams.
+FN_BadgeRender_t orig_BadgeRender = nullptr;
+// Trampoline for FUN_00b0fa80 (clean __cdecl sibling of the badge render).
+FN_BadgeRenderCdecl_t orig_BadgeRenderCdecl = nullptr;
 FN_SetTeamList_t orig_SetTeamList = nullptr;
 FN_BuildLeaguePanelVisualSlots_t orig_BuildLeaguePanelVisualSlots = nullptr;
 // Trampolines for FUN_00950580 / FUN_00b0fcd0. Both hooks fully
@@ -367,6 +378,34 @@ void ClubHooks::Register()
                  hook_BuildLeaguePanelVisualSlots_Naked,
                  orig_BuildLeaguePanelVisualSlots,
                  "BuildLeaguePanelVisualSlots");
+
+    // FUN_00863570 — GetTeamName. Hooked to supply custom team names/short
+    // names from teams/<ID>.ini for ids not in the stock list (else NULL).
+    INSTALL_HOOK(0x00863570,
+                 hook_GetTeamName,
+                 orig_GetTeamName,
+                 "GetTeamName");
+
+    // FUN_00b3beb0 — CrestResolve. Loads a team's crest into a scratch texture
+    // id for the caller to copy; hooked to supply custom crests from
+    // teams/<ID>.png for ids with no stock crest data (else the white flag).
+    INSTALL_HOOK(0x00b3beb0,
+                 hook_CrestResolve,
+                 orig_CrestResolve,
+                 "CrestResolve");
+
+    // FUN_00b0f990 — club-selection badge render. Naked thunk draws
+    // teams/<ID>.png for custom teams (else the white flag); stock falls through.
+    INSTALL_HOOK(0x00b0f990,
+                 hook_BadgeRender_Naked,
+                 orig_BadgeRender,
+                 "BadgeRender");
+
+    // FUN_00b0fa80 — clean __cdecl sibling of the badge render.
+    INSTALL_HOOK(0x00b0fa80,
+                 hook_BadgeRenderCdecl,
+                 orig_BadgeRenderCdecl,
+                 "BadgeRenderCdecl");
 
     // FUN_00b08b40 — PanelRefresh (display sub-object refresh callback).
     // Full replacement: the LEAGUE branch positions the selection cursor from

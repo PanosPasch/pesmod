@@ -315,6 +315,12 @@ void __cdecl hook_InitClubSelectionScreen()
 {
     Logger::Log("[ClubScreen] InitClubSelectionScreen. GameMode=%d", GAME_MODE_FLAG);
 
+    // Release last screen's custom textures before this screen reloads. Stock
+    // logos unload/reload themselves each entry; our customs are untracked, so
+    // we free them here to avoid piling up in the texture pool (which starved
+    // reloads on re-entry and eventually crashed).
+    UnloadCustomLeagueLogos();
+
     // Step 1: Preload league logos in ML/Cup mode
     if (GAME_MODE_FLAG == 4 && fn_LoadLeagueLogo)
     {
