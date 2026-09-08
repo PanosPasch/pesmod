@@ -444,8 +444,9 @@ bool RayTracer::Trace(VkAccelerationStructureKHR tlas, const SceneUniforms& unif
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd, &bi);
 
-    // The storage image must be in GENERAL for imageStore, and the previous
-    // frame left it in TRANSFER_SRC if it was read back.
+    // The storage image must be in GENERAL for imageStore. UNDEFINED as the
+    // old layout discards whatever was there, which is free and correct: the
+    // trace writes every pixel, so there is nothing to preserve.
     VkImageMemoryBarrier toGeneral{};
     toGeneral.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     toGeneral.oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED;

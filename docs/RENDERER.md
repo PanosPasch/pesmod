@@ -531,32 +531,78 @@ measured ~7 ms of overhead each; the self-test dropped from 22.5 ms to
 `PESModHost --astest` pushes a synthetic scene through the real transport and
 asserts the whole chain, so the GPU path is testable without a running game.
 
+**Recovering the view-projection.** The first attempt took the VP from the
+game's `SetTransform` calls and rejected 798 of 850 world transforms as
+non-affine — the matrices the fixed-function pipeline is told about are not
+the ones the shaders use. `ResolveViewProjection` instead treats the VP as
+unknown and scores candidates against the data: the previous frame's answer,
+the `SetTransform` product, then the distinct clip transforms the instances
+themselves carry (an instance with an identity world has a clip transform
+that *is* the VP). The winner must explain at least half the sampled
+instances. Only the affinity check made the original failure visible at all,
+which is the argument for keeping checks on things that "cannot" go wrong.
+
+### 6.5 The ray tracing pipeline
+
+Four shaders in three groups: raygen, two miss (sky and shadow), one
+closest-hit. Rays are built by unprojecting NDC through the recovered inverse
+view-projection at depth 0 and 1 — the camera and the geometry therefore come
+from the same matrix, which is what makes a basis recovered only up to an
+affine change of basis usable at all.
+
+The SBT respects `shaderGroupHandleSize`, `shaderGroupHandleAlignment` and
+`shaderGroupBaseAlignment` as three separate limits. On this GPU they are 32,
+32 and 64; a table packed at handle size alone works for the raygen record
+and then mis-addresses the miss records.
+
+Hit shading uses `VK_KHR_ray_tracing_position_fetch` to read the triangle's
+vertices in the hit shader, which avoids binding every mesh's vertex and index
+buffers just to compute a geometric normal. Shading matches what `vs_0007`
+does per vertex — clamped N·L against the directional light, plus the
+hemisphere term, plus ambient — with a traced shadow ray replacing the game's
+projected blob. Albedo is a placeholder: the game's baked vertex colour
+already contains its own lighting, so using it would double-light the scene
+(§4.3), and textures are not yet bound into the hit shader.
+
+Two orientation hazards, both silent when wrong:
+
+- **Matrices.** The game is row-vector row-major; GLSL is column-major and
+  evaluates `M * v`. Those cancel, so the matrix is uploaded verbatim and no
+  transpose happens anywhere. Adding one "for correctness" breaks it.
+- **Y.** The launch index counts down from the top row, but D3D's NDC y is
+  +1 at the top, so the raygen inverts y. Without it every frame is a perfect
+  vertical mirror — which no coverage or pixel-count check notices. The
+  self-test now asserts orientation directly: every vertex in the synthetic
+  scene has y >= 0 and the test camera only scales, so all of the geometry
+  must land above the midline.
+
+The traced frame is written out by `image_write.cpp` — PNG through WIC by
+default, PPM when the extension asks for it, since the self-test parses the
+pixels back and Windows will not preview a PPM.
+
 ---
 
 ## 7. Roadmap
 
-The lighting and transform questions are answered from captured data, and the
-transport and device are up, so what remains is mostly construction.
+Done: the transport, the device, scene reconstruction, acceleration
+structures, and a ray tracing pipeline that traces every live frame. What
+remains is what turns a traced image into a renderer.
 
-1. **Capture a shader-driven match frame.** The frames captured so far predate
-   shader-constant capture, so the c58 transforms and the lighting rig were
-   read from a menu frame. One match capture with the current build pins the
-   per-object WVP matrices for real geometry.
-2. **Scene reconstruction.** For each draw, read `c58..c61` as the combined
-   WVP. Separating the object transform from the camera needs the view-
-   projection, which is shared by every draw in a frame, so
-   `W = WVP · (VP)⁻¹` recovers each object's world matrix for the TLAS.
-   Normals come free for the 32-byte layout; the 24-byte pre-lit class needs
-   them reconstructed from triangle winding, and its baked vertex colour
-   de-lit into albedo.
-3. **The 64-bit render host.** Vulkan 1.3 with `VK_KHR_ray_tracing_pipeline`,
-   BLAS per mesh, a small TLAS per frame, shared-memory scene transport from
-   the ASI.
-4. **Lighting.** Seed directly from the captured constants — directional light
-   `c95`/`c94`, hemisphere `c93`/`c92`/`c91`, specular `c63`/`c70` — then
-   extend to physical stadium floodlights and a sky model.
-5. **Path tracing + denoise.** DLSS Ray Reconstruction is already present in
-   the game folder, making it the natural denoiser target.
-6. **Presentation and input.** The host owns the visible window; the game
+1. **Textures.** Albedo is a flat `vec3(0.72)` because nothing is bound into
+   the hit shader yet. This is the largest visual gap by far. The 24-byte
+   pre-lit class also needs its baked vertex colour de-lit into albedo,
+   rather than being used directly and lit twice.
+2. **Normals.** Currently geometric, so everything is faceted. The 32-byte
+   layout carries real per-vertex normals; they have to be carried through
+   the scene stream and interpolated in the hit shader.
+3. **Presentation and input.** The host owns the visible window; the game
    window becomes the input sink. The HUD draws are composited on top
-   unchanged, per the scope decision to leave the UI alone.
+   unchanged, per the scope decision to leave the UI alone. Until this
+   exists, `--save-every` writing PNGs is the only way to see output.
+4. **Overlap.** Every submit is followed by `vkQueueWaitIdle`, so structure
+   builds and traces are fully serialised. Fences would let them overlap.
+5. **Lighting beyond the game's rig.** The captured constants are the seed —
+   directional `c95`/`c94`, hemisphere `c93`/`c92`/`c91`, specular
+   `c63`/`c70` — then physical stadium floodlights and a sky model.
+6. **Path tracing + denoise.** DLSS Ray Reconstruction is already present in
+   the game folder, making it the natural denoiser target.
