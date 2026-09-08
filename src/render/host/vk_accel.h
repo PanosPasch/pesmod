@@ -83,6 +83,12 @@ namespace Host
 
         VkAccelerationStructureKHR Tlas() const { return m_tlas.handle; }
         const AccelStats& Stats() const { return m_stats; }
+
+        // The inverse of the view-projection the resolver settled on. The ray
+        // generation camera must come from this and not from SetTransform,
+        // for the same reason the world transforms do.
+        bool HasViewProj() const { return m_haveVpHint; }
+        const Math::Mat4& InverseViewProj() const { return m_lastInverseVp; }
         const std::string& LastError() const { return m_lastError; }
 
         // Drops persistent structures whose geometry is no longer resident.
@@ -186,6 +192,7 @@ namespace Host
         // object whose world matrix is identity does not, so last frame's
         // answer is the best first guess for this one.
         Math::Mat4  m_vpHint;
+        Math::Mat4  m_lastInverseVp;
         bool        m_haveVpHint;
 
         AccelStats  m_stats;

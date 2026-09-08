@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 namespace
@@ -51,9 +52,38 @@ namespace
             "                     must exceed the producer's 300-frame retention)\n"
             "  --quiet            only print the summary\n"
             "  --probe            create the Vulkan RT device, report, exit\n"
+            "  --astest           trace a synthetic scene, self-check, exit\n"
+            "  --shaders <dir>    directory holding the compiled .spv files\n"
+            "                     (default: shaders)\n"
+            "  --trace-height <n> traced image height; the width follows the\n"
+            "                     game aspect ratio (default 720, 0 = off)\n"
+            "  --save-frame <n>   write the nth traced frame to disk\n"
+            "  --save-path <file> where to write it (traced_frame.ppm)\n"
             "  --no-validation    disable Vulkan validation layers\n"
             "  --help\n",
             SceneIPC::kDefaultSectionName);
+    }
+
+    // The compiled shaders sit next to the build directory, not next to the
+    // executable, so a host launched from its own output folder would not
+    // find them. Both layouts are probed before giving up, which keeps
+    // --shaders for genuinely unusual locations rather than routine ones.
+    std::string ResolveShaderDir()
+    {
+        char exePath[MAX_PATH] = {0};
+        GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+        std::string dir(exePath);
+        const size_t slash = dir.find_last_of('\\');
+        dir = (slash == std::string::npos) ? std::string(".") : dir.substr(0, slash);
+
+        const char* candidates[] = { "\\shaders", "\\..\\shaders", "\\..\\..\\shaders" };
+        for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i)
+        {
+            const std::string probe = dir + candidates[i];
+            const DWORD attrs = GetFileAttributesA((probe + "\\primary.rgen.spv").c_str());
+            if (attrs != INVALID_FILE_ATTRIBUTES) return probe;
+        }
+        return "shaders";   // relative to the working directory, as before
     }
 
     const char* VertexKindName(uint32_t k)
@@ -436,7 +466,14 @@ int main(int argc, char** argv)
     bool        probeOnly = false;
     bool        asTest = false;
     bool        validation = true;
-    const char* shaderDir = "shaders";
+    std::string shaderDirStorage = ResolveShaderDir();
+    const char* shaderDir = shaderDirStorage.c_str();
+    // Width is not an option because it is not free: the recovered inverse
+    // view-projection carries the game aspect ratio, so the traced image has
+    // to keep it or the result comes out stretched. Only height is chosen.
+    uint32_t    traceHeight = 720;
+    uint64_t    saveFrame = 0;             // 1-based; 0 = never save
+    const char* savePath = "traced_frame.ppm";
 
     for (int i = 1; i < argc; ++i)
     {
@@ -449,6 +486,11 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--probe")) probeOnly = true;
         else if (!strcmp(argv[i], "--astest")) asTest = true;
         else if (!strcmp(argv[i], "--shaders") && i + 1 < argc) shaderDir = argv[++i];
+        else if (!strcmp(argv[i], "--trace-height") && i + 1 < argc)
+            traceHeight = (uint32_t)strtoul(argv[++i], nullptr, 10);
+        else if (!strcmp(argv[i], "--save-frame") && i + 1 < argc)
+            saveFrame = strtoull(argv[++i], nullptr, 10);
+        else if (!strcmp(argv[i], "--save-path") && i + 1 < argc) savePath = argv[++i];
         else if (!strcmp(argv[i], "--no-validation")) validation = false;
         else if (!strcmp(argv[i], "--help")) { PrintUsage(); return 0; }
         else { printf("unknown argument: %s\n\n", argv[i]); PrintUsage(); return 2; }
@@ -492,6 +534,12 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    // Created here but initialised on the first frame: the traced image has
+    // to match the game aspect ratio, which is not known until a frame
+    // arrives carrying its render size.
+    Host::RayTracer tracer;
+    bool tracerTried = false;
+
     Host::SceneReceiver rx;
 
     // The game may not be running yet, and may be restarted while the host
@@ -534,11 +582,97 @@ int main(int argc, char** argv)
             break;
         }
 
+        // ── Bring the tracer up on the first frame ───────────────────
+        // Only attempted once: if the shaders are missing, retrying every
+        // frame would bury the scene report under repeated errors, and the
+        // host stays useful for diagnostics without a trace.
+        if (traceHeight && !tracerTried)
+        {
+            tracerTried = true;
+            const SceneIPC::FrameBegin& fb = rx.CurrentFrame().begin;
+            const uint32_t srcW = fb.renderWidth  ? fb.renderWidth  : 640;
+            const uint32_t srcH = fb.renderHeight ? fb.renderHeight : 480;
+            const uint32_t w = (uint32_t)((double)traceHeight * srcW / srcH + 0.5);
+
+            if (tracer.Init(&gpu, &alloc, shaderDir, w, traceHeight))
+                printf("ray tracer ready: %ux%u (game renders %ux%u)\n\n",
+                       w, traceHeight, srcW, srcH);
+            else
+                printf("WARNING: ray tracing disabled - %s\n\n",
+                       tracer.LastError().c_str());
+        }
+
+        // ── Trace the frame ──────────────────────────────────────────────
+        // Only once the resolver has a view-projection it trusts; without it
+        // the camera and the geometry would disagree and the image would be
+        // meaningless rather than merely wrong.
+        if (tracer.IsReady() && accel.Tlas() != VK_NULL_HANDLE &&
+            accel.HasViewProj())
+        {
+            const Host::Frame& f = rx.CurrentFrame();
+
+            Host::SceneUniforms u{};
+            memcpy(u.invViewProj, accel.InverseViewProj().m, sizeof(u.invViewProj));
+
+            // The game's own rig, carried across frames by the receiver since
+            // the producer only resends it on change.
+            if (f.lightingValid)
+            {
+                memcpy(u.lightDirection, f.lighting.directionalDir,   sizeof(u.lightDirection));
+                memcpy(u.lightColor,     f.lighting.directionalColor, sizeof(u.lightColor));
+                memcpy(u.hemisphereAxis, f.lighting.hemisphereAxis,   sizeof(u.hemisphereAxis));
+                memcpy(u.skyColor,       f.lighting.skyColor,         sizeof(u.skyColor));
+                memcpy(u.groundColor,    f.lighting.groundColor,      sizeof(u.groundColor));
+                memcpy(u.ambient,        f.lighting.ambient,          sizeof(u.ambient));
+            }
+            else
+            {
+                // No lit draw has run yet, so the constants hold nothing. A
+                // zeroed rig would trace a black frame and read as a broken
+                // tracer rather than as missing lighting, so stand in a
+                // neutral overhead light until the real one arrives.
+                u.lightDirection[1] = -1.0f;
+                u.hemisphereAxis[1] = -1.0f;
+                u.lightColor[0]  = u.lightColor[1]  = u.lightColor[2]  = 0.90f;
+                u.skyColor[0]    = u.skyColor[1]    = u.skyColor[2]    = 0.45f;
+                u.groundColor[0] = u.groundColor[1] = u.groundColor[2] = 0.18f;
+                u.ambient[0]     = u.ambient[1]     = u.ambient[2]     = 0.10f;
+            }
+            u.params[0] = 20000.0f;   // shadow ray length, in the game's units
+            u.params[1] = 1.0f;
+
+            if (tracer.Trace(accel.Tlas(), u))
+            {
+                if (saveFrame && reported + 1 == saveFrame)
+                {
+                    if (tracer.SaveImage(savePath))
+                        printf("    wrote traced frame to %s\n", savePath);
+                    else
+                        printf("    image save failed: %s\n",
+                               tracer.LastError().c_str());
+                }
+                if (!quiet)
+                    printf("    trace: %ux%u in %.2f ms\n",
+                           tracer.Stats().width, tracer.Stats().height,
+                           tracer.Stats().traceMilliseconds);
+            }
+            else if (!quiet)
+            {
+                printf("    trace failed: %s\n", tracer.LastError().c_str());
+            }
+        }
+
         if (!quiet) { ReportFrame(rx); ReportAccel(accel.Stats()); }
         ++reported;
         if (maxFrames && reported >= maxFrames) break;
     }
 
     ReportSummary(rx);
+
+    // Explicit, and in reverse order of creation: the tracer holds descriptors
+    // naming the builder TLAS, and both draw memory from the allocator.
+    tracer.Shutdown();
+    accel.Shutdown();
+    alloc.Shutdown();
     return 0;
 }

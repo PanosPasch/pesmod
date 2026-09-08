@@ -584,6 +584,7 @@ bool AccelBuilder::ResolveViewProjection(const Frame& frame, Math::Mat4& outInve
     }
 
     outInverse       = candidates[bestIndex].inverse;
+    m_lastInverseVp  = candidates[bestIndex].inverse;
     m_vpHint         = candidates[bestIndex].vp;
     m_haveVpHint     = true;
     m_stats.vpSource = candidates[bestIndex].source;

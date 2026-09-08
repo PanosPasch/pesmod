@@ -73,6 +73,14 @@ namespace Host
         // for every frame.
         bool SaveImage(const char* path);
 
+        // The pipeline is the last thing Init creates, so its presence
+        // is what distinguishes a usable tracer from one whose shaders
+        // were missing.
+        bool IsReady() const { return m_pipeline != VK_NULL_HANDLE; }
+
+        uint32_t Width()  const { return m_width; }
+        uint32_t Height() const { return m_height; }
+
         const TraceStats& Stats() const { return m_stats; }
         const std::string& LastError() const { return m_lastError; }
 
