@@ -46,7 +46,12 @@ namespace
     // Anything the producer still believes cached was therefore used
     // recently enough that the host cannot yet have dropped it.
     std::unordered_map<uint64_t, uint64_t> g_geometryLastUsed;
-    const uint64_t kGeometryRetentionFrames = 300;
+    // Deliberately far below the host's own retention (900 frames by
+    // default). A live run still showed ~35 instances per frame referencing
+    // geometry the host had evicted and the producer still believed sent, so
+    // the margin is widened rather than trusted: anything undrawn for a
+    // second is forgotten here and re-sent on next use.
+    const uint64_t kGeometryRetentionFrames = 60;
 
     LightingDesc g_lastLighting;
     bool         g_lightingSent = false;

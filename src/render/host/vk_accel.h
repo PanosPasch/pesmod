@@ -57,6 +57,10 @@ namespace Host
         uint32_t spriteTriangles;
         uint32_t tlasInstances;
         uint32_t transformsRejected;    // recovered world matrix not affine
+        uint32_t vpCandidatesTried;
+        uint32_t vpBestScore;           // instances yielding an affine world
+        uint32_t vpSampleSize;
+        const char* vpSource;           // where the winning VP came from
         uint32_t geometryUnresolved;    // instance referenced missing geometry
         uint64_t blasBytes;
         uint64_t scratchBytes;
@@ -135,6 +139,28 @@ namespace Host
         void DestroyAccel(Accel& accel);
 
         // Recovers object-to-world from the frame's shared view-projection.
+        // Works out which matrix the shaders actually used as the combined
+        // view-projection.
+        //
+        // The obvious source - view * projection from SetTransform - is wrong
+        // here, because the 3D draws are shader-driven and ignore SetTransform
+        // entirely. Feeding it to the factorisation rejected 798 of 850
+        // instances on a real frame.
+        //
+        // Instead the VP is identified from the data. Any object drawn with an
+        // identity world matrix has clipTransform == VP exactly, and static
+        // scene geometry is usually authored that way, so each distinct
+        // clipTransform is scored by how many instances it turns into an
+        // affine world matrix. The best scorer wins.
+        //
+        // Note the factorisation is only determined up to an affine change of
+        // basis: several candidates can yield affine worlds, differing by a
+        // fixed transform. That is harmless as long as the camera used for ray
+        // generation is derived from the same VP, which it is - what matters
+        // is that the scene is internally consistent, not that the basis
+        // matches the game's own.
+        bool ResolveViewProjection(const Frame& frame, Math::Mat4& outInverse);
+
         bool RecoverWorld(const SceneIPC::InstanceDesc& inst,
                           const Math::Mat4& inverseViewProj,
                           bool haveInverse, Math::Mat4& outWorld) const;
@@ -155,6 +181,12 @@ namespace Host
 
         GpuBuffer    m_scratch;
         VkDeviceSize m_scratchCapacity;
+
+        // The VP identified last frame. The camera moves every frame, but the
+        // object whose world matrix is identity does not, so last frame's
+        // answer is the best first guess for this one.
+        Math::Mat4  m_vpHint;
+        bool        m_haveVpHint;
 
         AccelStats  m_stats;
         std::string m_lastError;

@@ -40,7 +40,7 @@ namespace
 AccelBuilder::AccelBuilder()
     : m_device(nullptr), m_alloc(nullptr), m_commandPool(VK_NULL_HANDLE)
     , m_spriteCapacityBytes(0), m_tlasCapacityBytes(0), m_scratchCapacity(0)
-    , m_frameCounter(0)
+    , m_haveVpHint(false), m_frameCounter(0)
 {
     memset(&m_stats, 0, sizeof(m_stats));
 }
@@ -503,6 +503,89 @@ bool AccelBuilder::RecordAndSubmit(std::vector<PendingBuild>& blasJobs,
     return true;
 }
 
+bool AccelBuilder::ResolveViewProjection(const Frame& frame, Math::Mat4& outInverse)
+{
+    m_stats.vpCandidatesTried = 0;
+    m_stats.vpBestScore       = 0;
+    m_stats.vpSampleSize      = 0;
+    m_stats.vpSource          = "none";
+
+    if (frame.instances.empty()) return false;
+
+    // Score a candidate by how many instances it turns into an affine world
+    // matrix. A correct VP makes nearly all of them affine; a wrong one makes
+    // almost none, so the two are separated by a wide margin rather than a
+    // delicate threshold.
+    const size_t sampleStride =
+        frame.instances.size() > 128 ? frame.instances.size() / 128 : 1;
+
+    struct Candidate { Math::Mat4 vp; Math::Mat4 inverse; const char* source; };
+    std::vector<Candidate> candidates;
+
+    auto addCandidate = [&](const Math::Mat4& vp, const char* source)
+    {
+        if (candidates.size() >= 24) return;
+        Math::Mat4 inv;
+        if (!Math::Inverse(vp, inv)) return;
+        // Skip duplicates; the same clip transform recurs across instances.
+        for (size_t i = 0; i < candidates.size(); ++i)
+            if (memcmp(candidates[i].vp.m, vp.m, sizeof(vp.m)) == 0) return;
+        Candidate c; c.vp = vp; c.inverse = inv; c.source = source;
+        candidates.push_back(c);
+    };
+
+    // The VP that worked last frame is tried first: the camera moves, but the
+    // *object* whose world matrix is identity stays the same, so its clip
+    // transform remains the best candidate frame to frame.
+    if (m_haveVpHint) addCandidate(m_vpHint, "previous frame hint");
+
+    // What SetTransform claims. Correct for the fixed-function draws, wrong
+    // for the shader ones, but cheap to test and it wins when it is right.
+    addCandidate(Math::Multiply(frame.begin.view, frame.begin.projection),
+                 "SetTransform view*projection");
+
+    // Distinct clip transforms from the instances themselves. Any object with
+    // an identity world matrix has clipTransform == VP exactly.
+    for (size_t i = 0; i < frame.instances.size() && candidates.size() < 24; ++i)
+        addCandidate(frame.instances[i].clipTransform, "instance clip transform");
+
+    m_stats.vpCandidatesTried = (uint32_t)candidates.size();
+
+    uint32_t sampled = 0;
+    for (size_t i = 0; i < frame.instances.size(); i += sampleStride) ++sampled;
+    m_stats.vpSampleSize = sampled;
+
+    int bestIndex = -1;
+    uint32_t bestScore = 0;
+    for (size_t c = 0; c < candidates.size(); ++c)
+    {
+        uint32_t score = 0;
+        for (size_t i = 0; i < frame.instances.size(); i += sampleStride)
+        {
+            const Math::Mat4 world =
+                Math::Multiply(frame.instances[i].clipTransform, candidates[c].inverse);
+            if (Math::IsAffine(world, 1e-2f)) ++score;
+        }
+        if (score > bestScore) { bestScore = score; bestIndex = (int)c; }
+    }
+
+    m_stats.vpBestScore = bestScore;
+
+    // Require a clear majority. A candidate that only explains a handful of
+    // instances is coincidence, and using it would misplace everything else.
+    if (bestIndex < 0 || bestScore * 2 < sampled)
+    {
+        m_haveVpHint = false;
+        return false;
+    }
+
+    outInverse       = candidates[bestIndex].inverse;
+    m_vpHint         = candidates[bestIndex].vp;
+    m_haveVpHint     = true;
+    m_stats.vpSource = candidates[bestIndex].source;
+    return true;
+}
+
 bool AccelBuilder::RecoverWorld(const InstanceDesc& inst,
                                 const Math::Mat4& inverseViewProj,
                                 bool haveInverse, Math::Mat4& outWorld) const
@@ -537,10 +620,8 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene)
 
     // The view-projection is shared by every draw in the frame, so it is
     // inverted once rather than per instance.
-    const Math::Mat4 viewProj =
-        Math::Multiply(frame.begin.view, frame.begin.projection);
     Math::Mat4 inverseViewProj;
-    const bool haveInverse = Math::Inverse(viewProj, inverseViewProj);
+    const bool haveInverse = ResolveViewProjection(frame, inverseViewProj);
 
     std::vector<VkAccelerationStructureInstanceKHR> tlasInstances;
     tlasInstances.reserve(frame.instances.size() + 1);

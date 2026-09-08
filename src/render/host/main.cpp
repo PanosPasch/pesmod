@@ -173,14 +173,25 @@ namespace
                               payload.data(), (uint32_t)payload.size(), false);
         }
 
-        // Identity view and projection, so the recovered world transform is
-        // the clip transform itself and the affinity check must pass.
+        // Reproduces the failure seen against the real game: the view and
+        // projection reported via SetTransform are NOT the ones the shaders
+        // used, so the naive factorisation rejects almost every instance.
+        // Here they are left as identity while the instances are built with a
+        // genuine perspective VP, which the resolver has to find on its own.
+        Host::Math::Mat4 trueVp = Host::Math::Identity();
+        trueVp.m[0]  = 1.3f;    // 1/(aspect*tan)
+        trueVp.m[5]  = 2.4f;    // 1/tan
+        trueVp.m[10] = 1.001f;
+        trueVp.m[11] = 1.0f;    // the terms that make it non-affine
+        trueVp.m[14] = -0.1f;
+        trueVp.m[15] = 0.0f;
+
         SceneIPC::FrameBegin fb{};
         fb.frameIndex   = 1;
         fb.renderWidth  = 1920;
         fb.renderHeight = 1080;
-        fb.view         = Host::Math::Identity();
-        fb.projection   = Host::Math::Identity();
+        fb.view         = Host::Math::Identity();   // deliberately wrong
+        fb.projection   = Host::Math::Identity();   // deliberately wrong
         fb.instanceCount = 3;
         producer.TryWrite(SceneIPC::kMsgFrameBegin, &fb, sizeof(fb), nullptr, 0, true);
 
@@ -190,10 +201,15 @@ namespace
                                   0x2222222200000002ull };
         for (int i = 0; i < 3; ++i)
         {
+            // clip = world * VP, exactly as the game's shaders compute it.
+            // Instance 0 has an identity world, so its clip transform IS the
+            // VP - which is the foothold the resolver needs.
+            Host::Math::Mat4 world = Host::Math::Identity();
+            world.m[12] = (float)i * 3.0f;
+
             SceneIPC::InstanceDesc inst{};
             inst.geometryId    = ids[i];
-            inst.clipTransform = Host::Math::Identity();
-            inst.clipTransform.m[12] = (float)i * 3.0f;   // offset each one
+            inst.clipTransform = Host::Math::Multiply(world, trueVp);
             inst.baseColorFactor[0] = inst.baseColorFactor[1] =
             inst.baseColorFactor[2] = inst.baseColorFactor[3] = 1.0f;
             producer.TryWrite(SceneIPC::kMsgInstance, &inst, sizeof(inst),
@@ -243,6 +259,11 @@ namespace
         check(st.spriteTriangles == 4,      "sprite batch holds 4 triangles");
         check(st.tlasInstances == 2,        "TLAS = 1 mesh + 1 merged sprite instance");
         check(accel.Tlas() != VK_NULL_HANDLE, "TLAS handle created");
+        check(st.vpBestScore == st.vpSampleSize,
+              "resolver found a VP explaining every instance");
+        printf("  VP source: %s (%u/%u affine, %u candidates)\n",
+               st.vpSource ? st.vpSource : "none",
+               st.vpBestScore, st.vpSampleSize, st.vpCandidatesTried);
 
         printf("  build took %.2f ms, BLAS storage %.1f KB\n",
                st.buildMilliseconds, st.blasBytes / 1024.0);
