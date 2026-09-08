@@ -300,47 +300,95 @@ The same 24-byte layout also appears as FVF `0x142` (`XYZ|DIFFUSE|TEX1`) on 16
 `DrawPrimitive` calls, independently confirming it.
 
 Index buffers are 16-bit (`D3DFMT_INDEX16`).
+### 4.3 Shading: what the shaders actually do
 
-### 4.3 The material model
+The captured bytecode settles this. `tools/sm1dis.py` disassembles the dumps.
 
-Uniform across all 438 world-space draws:
-
-| State | Value | Consequence |
-| ----- | ----- | ----------- |
-| `D3DRS_LIGHTING` | **0** | fixed-function lighting is *off*; nothing is lit at draw time |
-| `D3DRS_SPECULARENABLE` | 0 | no specular term |
-| `D3DRS_COLORVERTEX` | 1 | vertex colour is the colour source |
-| Stage 0 `COLOROP` | `MODULATE` | |
-| Stage 1 `COLOROP` | `DISABLE` | a single texture stage |
-
-So for any draw with **no pixel shader bound**, the shading model is:
+**The transform.** Every vertex shader starts the same way:
 
 ```
-pixel = texture(uv) x vertexColour
+m4x4   oPos, v0, c58        ; combined world-view-projection at c58..c61
+dp4    oFog, v0, c67        ; fog plane
 ```
 
-**Caveat, and why the next capture matters.** A bound pixel shader overrides
-the texture stage states completely, so `D3DTSS_COLOROP` only describes the
-shading when `SetPixelShader(0)` is in effect. The frame these numbers come
-from was captured before pixel-shader binding was recorded, and the binary
-does contain `ps.1.x` assembler support — so this model is confirmed only for
-draws that turn out to have no pixel shader. Each draw record now carries
-`"ps"` and a `"tssAuthoritative"` flag so the distinction is explicit.
+So `c58..c61` is a **single combined WVP matrix**, per draw. The captured
+values confirm it: `c58.x = -5.5859` matches the projection `_11` seen via
+`SetTransform`, and `c61.w = 2236.07` matches the view translation. This is
+the number the scene builder needs — not `SetTransform`, which the shaders
+ignore.
 
-**There are no normals anywhere in the pipeline** — not in the vertex format,
-and no lights are ever set. All illumination is pre-baked into the vertex
-colours (the warm `FFF2EBBC` tint is baked stadium lighting).
+**Two geometry classes**, distinguished by their vertex layout:
 
-This is the central problem for the ray tracer, and it is exactly what RTX
-Remix has to solve too:
+| Layout | `v1` | Shader | Meaning |
+| ------ | ---- | ------ | ------- |
+| 24 B `v0:float3 v1:d3dcolor v2:float2` | vertex colour | `vs_0003` | pre-lit geometry |
+| 32 B `v0:float3 v1:float3 v2:float2` | **normal** | `vs_0005`, `vs_0007` | dynamically lit geometry |
 
-- **Normals must be reconstructed** from triangle winding, then smoothed
-  across shared vertices to avoid a faceted look.
-- **Albedo must be recovered** from `texture x bakedLight`. Using the vertex
-  colour as-is would double-light the scene once real lighting is added.
+For the pre-lit class, shading really is just `mul oD0, v1, c72` — vertex
+colour times a global tint. For the lit class, `vs_0007` computes real
+lighting per vertex:
 
-Other per-draw variation: `CULLMODE` is CW on 327 draws and NONE on 111, alpha
-blending is on for 388, alpha test for 420, and fog for 436 of 438.
+```
+dp3    r11.x, v1, c95       ; N · L        (c95 = light direction)
+max    r11.x, r11.x, c57.x  ; clamp at 0
+mul    r10,   r11.x, c94    ; x light colour
+dp3    r9.x,  v1, c93       ; N · up       (c93 = hemisphere axis)
+mad    r9.x,  r9.x, c57.w, c57.w   ; remap -1..1 to 0..1
+mad    r10,   c92, r9.x, r10       ; + sky colour
+mul    r8.xyz, r10, c69
+add    r8.xyz, r8, c68             ; + ambient
+mul    oD0.xyz, r8, c72            ; x global tint
+dp3    r6.xy, v1, -c63             ; specular half-vector
+lit    r6, r6
+mul    oD1, r6.z, c70              ; specular colour
+```
+
+**The lighting rig is readable, not lost.** Captured constant values:
+
+| Register | Value | Role |
+| -------- | ----- | ---- |
+| `c95` | `(-0.4968, -0.7360, 0.4600)` | directional light vector — **unit length** |
+| `c94` | `(0.97, 0.97, 0.97)` | light colour |
+| `c93` | `(0, -1, 0)` | hemisphere axis |
+| `c92` | `(0.53, 0.50, 0.42)` | sky colour (warm) |
+| `c91` | `(0.22, 0.20, 0.18)` | ground colour |
+| `c68` | `(0.1, 0.2, 0.2)` | ambient add |
+| `c70` | `(0.2, 0.2, 0.2, 2.0)` | specular colour + exponent |
+| `c63` | `(0.5949, 0.4195, 0.6856)` | specular half-vector — **unit length** |
+
+That is a directional light plus a hemisphere ambient, with a normalised
+direction and physically sensible colours. It can be lifted straight into the
+ray tracer as the starting lighting rig.
+
+**Per-pixel shading.** The pixel shaders do normal mapping:
+
+```
+ps_0003    tex t0                    ; base texture
+           tex t1                    ; normal map
+           texm3x2pad  t2, 1-t1      ; transform the normal
+           texm3x2tex  t3, 1-t1      ; lighting lookup
+           mad r1.xyz, t3, c1, v0    ; light x c1 + interpolated vertex colour
+           mul r0.xyz, t0, r1        ; x base texture
+           mov r0.w, v0.w
+```
+
+So the real model is `baseTexture x (lighting + vertexColour)`, with a
+normal map feeding a lookup — not the `texture x vertexColour` that the fixed
+function texture-stage states suggest. Those stage states describe only the
+draws with no pixel shader bound; `"tssAuthoritative"` in each draw record
+says which is which.
+
+**Corrections this forced.** Two earlier conclusions in this document were
+wrong and are retracted:
+
+- *"There are no normals anywhere in the pipeline."* False. The 24-byte
+  layout has none, but the 32-byte layout's `v1` is a normal and is consumed
+  by `dp3 v1, c95`. The mistake was generalising from the one layout that had
+  been decoded.
+- *"No lights are ever set, so stadium lighting has to be authored."* False.
+  `D3DRS_LIGHTING = 0` and the absence of `SetLight` calls are real, but they
+  mean the *fixed-function* lighting pipeline is unused — because the shaders
+  do the lighting from constants instead.
 
 ### 4.4 Menu rendering, for contrast
 
@@ -369,28 +417,40 @@ honest reporting of resources that could not be read back.
   affected one 3840x2160 surface.
 - Vertex declarations created before the hook is installed cannot be resolved;
   draws using them classify as `unknown`.
-- The material model in 4.3 is confirmed only for draws with no pixel shader
-  bound. Pixel-shader capture exists but has not yet been exercised in-game.
+- The captured shader constants and lighting rig come from a menu frame; a
+  match frame will have different per-object `c58` values, though the register
+  *assignments* are fixed by the shader bytecode and will not move.
+- `capture_on_first_3d` alone fires on the team-select and kit-preview menus,
+  which draw a handful of 3D elements. `capture_min_3d_draws` (default 100)
+  gates it so it lands on gameplay instead.
 - `ApplyStateBlock` would desynchronise the shadow. The game does not use state
   blocks, and the proxy logs a one-time warning if that ever changes.
 
 ---
-
 ## 6. Roadmap
 
-1. **Scene reconstruction.** Group the 17 per-frame transforms into stable
-   objects across frames, reconstruct normals, and de-light the vertex colours
-   into albedo. Establish the world-unit scale (positions suggest roughly
-   1 unit ~ 1 cm, given a pitch on the order of 10,500 x 6,800 units) so that
-   lighting can be physical.
-2. **The 64-bit render host.** Vulkan 1.3 with `VK_KHR_ray_tracing_pipeline`,
-   BLAS per mesh, a 17-instance TLAS per frame, shared-memory scene transport
-   from the ASI.
-3. **Lighting.** Nothing can be inherited from the game — there are no lights
-   in the pipeline at all — so stadium lighting has to be authored: floodlight
-   rigs plus a sky/environment term.
-4. **Path tracing + denoise.** DLSS Ray Reconstruction is already present in
+The lighting and transform questions are now answered from captured data, so
+what remains is mostly construction rather than investigation.
+
+1. **Capture a shader-driven match frame.** The frames captured so far predate
+   shader-constant capture, so the c58 transforms and the lighting rig were
+   read from a menu frame. One match capture with the current build pins the
+   per-object WVP matrices for real geometry.
+2. **Scene reconstruction.** For each draw, read `c58..c61` as the combined
+   WVP. Separating the object transform from the camera needs the view-
+   projection, which is shared by every draw in a frame, so
+   `W = WVP · (VP)⁻¹` recovers each object's world matrix for the TLAS.
+   Normals come free for the 32-byte layout; the 24-byte pre-lit class needs
+   them reconstructed from triangle winding, and its baked vertex colour
+   de-lit into albedo.
+3. **The 64-bit render host.** Vulkan 1.3 with `VK_KHR_ray_tracing_pipeline`,
+   BLAS per mesh, a small TLAS per frame, shared-memory scene transport from
+   the ASI.
+4. **Lighting.** Seed directly from the captured constants — directional light
+   `c95`/`c94`, hemisphere `c93`/`c92`/`c91`, specular `c63`/`c70` — then
+   extend to physical stadium floodlights and a sky model.
+5. **Path tracing + denoise.** DLSS Ray Reconstruction is already present in
    the game folder, making it the natural denoiser target.
-5. **Presentation and input.** The host owns the visible window; the game
-   window becomes the input sink. The 22 HUD draws are composited on top
+6. **Presentation and input.** The host owns the visible window; the game
+   window becomes the input sink. The HUD draws are composited on top
    unchanged, per the scope decision to leave the UI alone.

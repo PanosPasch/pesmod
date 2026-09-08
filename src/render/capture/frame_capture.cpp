@@ -899,11 +899,17 @@ void OnDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
     // key press. Arming on the first world-space draw catches it automatically.
     // The capture is deferred to the *next* frame because this one is already
     // partway through and its earlier draws are gone.
-    if (space == kSpaceWorld && !g_first3DSeen)
+    // Arm only once a frame is carrying enough world-space geometry to be a
+    // real scene. Firing on the very first 3D draw lands on the team-select
+    // and kit-preview menus, which render a few 3D elements long before
+    // kick-off; a match frame issues several hundred.
+    if (space == kSpaceWorld && !g_first3DSeen &&
+        g_stats.drawCalls3D >= (uint32_t)RenderConfig::CaptureMin3DDraws())
     {
         g_first3DSeen = true;
-        Logger::Log("[Capture] First world-space geometry at frame %u "
-                    "(vs 0x%X, %s).", g_frameIndex, state.vertexShader,
+        Logger::Log("[Capture] Frame %u reached %u world-space draws "
+                    "(vs 0x%X, %s).", g_frameIndex, g_stats.drawCalls3D,
+                    state.vertexShader,
                     D3D8Util::VertexShaderArgIsFvf(state.vertexShader)
                         ? "FVF" : "declaration");
         if (RenderConfig::CaptureOnFirst3D() && !g_capturing)

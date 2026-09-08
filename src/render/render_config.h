@@ -41,10 +41,18 @@ namespace RenderConfig
     // [render] capture_at_frame = 0
     int CaptureAtFrame();
 
-    // Automatically capture the frame after the first world-space (non
-    // XYZRHW) draw appears. That is the moment the game leaves the menus and
-    // starts rendering an actual 3D scene, which is the interesting one and
-    // is otherwise fiddly to trigger by hand.
+    // Automatically capture once a frame contains world-space geometry.
     // [render] capture_on_first_3d = 0
     bool CaptureOnFirst3D();
+
+    // How many world-space draws a frame needs before that trigger fires.
+    //
+    // A threshold of 1 fires on the *first* 3D draw anywhere, which in
+    // practice means a menu: the team-select and kit-preview screens render a
+    // handful of 3D elements long before kick-off, and those frames are not
+    // what the ray tracer is being built for. A match frame issues several
+    // hundred world-space draws, so a threshold around 100 skips the menus
+    // and lands on real gameplay.
+    // [render] capture_min_3d_draws = 100
+    int CaptureMin3DDraws();
 }
