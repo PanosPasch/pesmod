@@ -8,8 +8,14 @@ layout(location = 0) rayPayloadEXT vec3 hitColor;
 void main()
 {
     const vec2 pixelCenter = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
-    const vec2 uv  = pixelCenter / vec2(gl_LaunchSizeEXT.xy);
-    const vec2 ndc = uv * 2.0 - 1.0;
+    const vec2 uv = pixelCenter / vec2(gl_LaunchSizeEXT.xy);
+
+    // Y is inverted, not merely scaled. gl_LaunchIDEXT.y counts down from the
+    // top row, and imageStore and the file writer both keep that order, but
+    // the matrix being inverted is Direct3D's, where NDC y is +1 at the TOP.
+    // Without the flip every traced frame comes out vertically mirrored —
+    // which the self-test scene is far too symmetric to notice.
+    const vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
 
     // The ray is built from the same inverse view-projection the world
     // transforms were factored with. That matters: the recovered basis is

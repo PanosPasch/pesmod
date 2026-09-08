@@ -377,18 +377,37 @@ namespace
                     fclose(img);
 
                     const uint8_t bg[3] = { px[0], px[1], px[2] };
-                    size_t differing = 0;
-                    for (size_t i = 0; i < px.size(); i += 3)
-                        if (px[i] != bg[0] || px[i+1] != bg[1] || px[i+2] != bg[2])
+                    size_t differing = 0, inTopHalf = 0;
+                    for (int y = 0; y < h; ++y)
+                        for (int x = 0; x < w; ++x)
+                        {
+                            const size_t i = ((size_t)y * w + x) * 3;
+                            if (px[i] == bg[0] && px[i+1] == bg[1] &&
+                                px[i+2] == bg[2]) continue;
                             ++differing;
+                            if (y < h / 2) ++inTopHalf;
+                        }
 
                     const double coverage = 100.0 * differing / ((double)w * h);
                     check(differing > 0, "rays actually hit geometry");
                     check(coverage < 99.0, "background is present, so the "
                                            "camera is not inside the geometry");
-                    printf("  geometry covers %.1f%% of the frame; "
+
+                    // Every vertex in the scene has y >= 0, and the test
+                    // camera only scales, so all of it belongs above the
+                    // horizon — that is, in the TOP half of the image, since
+                    // Direct3D puts NDC y = +1 at the top while the launch
+                    // index and the file both start at the top row. Get the
+                    // flip wrong and the image is a perfect mirror, which no
+                    // coverage count would ever notice.
+                    check(differing > 0 && inTopHalf == differing,
+                          "image is the right way up");
+                    printf("  geometry covers %.1f%% of the frame "
+                           "(%.0f%% of it above the midline); "
                            "background rgb(%u,%u,%u)\n",
-                           coverage, bg[0], bg[1], bg[2]);
+                           coverage,
+                           differing ? 100.0 * inTopHalf / differing : 0.0,
+                           bg[0], bg[1], bg[2]);
                 }
                 printf("  traced %ux%u in %.2f ms, SBT %llu bytes\n",
                        tracer.Stats().width, tracer.Stats().height,
