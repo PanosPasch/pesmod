@@ -58,6 +58,7 @@ namespace
             "  --trace-height <n> traced image height; the width follows the\n"
             "                     game aspect ratio (default 720, 0 = off)\n"
             "  --save-frame <n>   write the nth traced frame to disk\n"
+            "  --save-every <n>   write every nth traced frame, numbered\n"
             "  --save-path <file> where to write it (default traced_frame.png;\n"
             "                     a .ppm extension writes a PPM instead)\n"
             "  --no-validation    disable Vulkan validation layers\n"
@@ -85,6 +86,23 @@ namespace
             if (attrs != INVALID_FILE_ATTRIBUTES) return probe;
         }
         return "shaders";   // relative to the working directory, as before
+    }
+
+    // "shot.png" + 42 -> "shot_000042.png". Zero-padded so the frames sort
+    // in order in a file listing, which is the whole point of writing a
+    // series of them rather than one.
+    std::string NumberedPath(const char* base, uint64_t n)
+    {
+        std::string s(base);
+        const size_t dot   = s.find_last_of('.');
+        const size_t slash = s.find_last_of("\\/");
+        const size_t split = (dot != std::string::npos &&
+                              (slash == std::string::npos || dot > slash))
+                                 ? dot : s.size();
+
+        char suffix[32];
+        sprintf_s(suffix, "_%06llu", (unsigned long long)n);
+        return s.substr(0, split) + suffix + s.substr(split);
     }
 
     const char* VertexKindName(uint32_t k)
@@ -498,6 +516,7 @@ int main(int argc, char** argv)
     // to keep it or the result comes out stretched. Only height is chosen.
     uint32_t    traceHeight = 720;
     uint64_t    saveFrame = 0;             // 1-based; 0 = never save
+    uint64_t    saveEvery = 0;             // 0 = off
     const char* savePath = "traced_frame.png";
 
     for (int i = 1; i < argc; ++i)
@@ -515,6 +534,8 @@ int main(int argc, char** argv)
             traceHeight = (uint32_t)strtoul(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--save-frame") && i + 1 < argc)
             saveFrame = strtoull(argv[++i], nullptr, 10);
+        else if (!strcmp(argv[i], "--save-every") && i + 1 < argc)
+            saveEvery = strtoull(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--save-path") && i + 1 < argc) savePath = argv[++i];
         else if (!strcmp(argv[i], "--no-validation")) validation = false;
         else if (!strcmp(argv[i], "--help")) { PrintUsage(); return 0; }
@@ -668,10 +689,18 @@ int main(int argc, char** argv)
 
             if (tracer.Trace(accel.Tlas(), u))
             {
-                if (saveFrame && reported + 1 == saveFrame)
+                const uint64_t n = reported + 1;
+                if ((saveFrame && n == saveFrame) ||
+                    (saveEvery && n % saveEvery == 0))
                 {
-                    if (tracer.SaveImage(savePath))
-                        printf("    wrote traced frame to %s\n", savePath);
+                    // A series gets numbered names; a single shot keeps the
+                    // name it was given, so scripting around it stays simple.
+                    const std::string out =
+                        saveEvery ? NumberedPath(savePath, n)
+                                  : std::string(savePath);
+
+                    if (tracer.SaveImage(out.c_str()))
+                        printf("    wrote traced frame to %s\n", out.c_str());
                     else
                         printf("    image save failed: %s\n",
                                tracer.LastError().c_str());
