@@ -559,16 +559,18 @@ HRESULT __stdcall ProxyDevice8::CreateVertexShader(const DWORD* pDecl, const DWO
     if (SUCCEEDED(hr) && pHandle && m_captureEnabled)
     {
         Registry::AddVertexShader((uint32_t)*pHandle, (const uint32_t*)pDecl,
-                                  pFunc != nullptr);
+                                  (const uint32_t*)pFunc);
 
         const Registry::VertexShaderInfo* info =
             Registry::FindVertexShader((uint32_t)*pHandle);
         char desc[256];
-        Logger::Log("[Render] CreateVertexShader handle=0x%X %s: %s",
+        Logger::Log("[Render] CreateVertexShader handle=0x%X %s (%u tokens): %s",
                     (unsigned)*pHandle,
-                    pFunc ? "(with function)" : "(declaration only)",
-                    info ? D3D8Util::VertexDeclDescribe(info->layout, desc,
-                                                        sizeof(desc))
+                    pFunc ? "vs shader" : "declaration only",
+                    info ? (unsigned)info->function.size() : 0u,
+                    info ? D3D8Util::VertexDeclDescribe(
+                               info->layout, pFunc == nullptr, desc,
+                               sizeof(desc))
                          : "<undecodable>");
     }
     return hr;
@@ -581,7 +583,18 @@ HRESULT __stdcall ProxyDevice8::DeleteVertexShader(DWORD Handle)
     return m_real->DeleteVertexShader(Handle);
 }
 HRESULT __stdcall ProxyDevice8::SetVertexShaderConstant(DWORD R, const void* pData, DWORD C)
-    { return m_real->SetVertexShaderConstant(R, pData, C); }
+{
+    // For a shader-driven draw this is where the object and camera transforms
+    // actually live; SetTransform is ignored by the vertex shader entirely.
+    if (pData && C && R < kMaxVsConstants)
+    {
+        const DWORD count = (R + C > kMaxVsConstants) ? (kMaxVsConstants - R) : C;
+        memcpy(&m_state.vsConstants[R][0], pData, (size_t)count * 4u * sizeof(float));
+        if (R + count > m_state.vsConstantsHighWater)
+            m_state.vsConstantsHighWater = R + count;
+    }
+    return m_real->SetVertexShaderConstant(R, pData, C);
+}
 HRESULT __stdcall ProxyDevice8::GetVertexShaderConstant(DWORD R, void* pData, DWORD C)
     { return m_real->GetVertexShaderConstant(R, pData, C); }
 HRESULT __stdcall ProxyDevice8::GetVertexShaderDeclaration(DWORD H, void* pData, DWORD* pSize)
@@ -593,13 +606,42 @@ HRESULT __stdcall ProxyDevice8::GetStreamSource(UINT S, IDirect3DVertexBuffer8**
 HRESULT __stdcall ProxyDevice8::GetIndices(IDirect3DIndexBuffer8** pp, UINT* pBase)
     { return m_real->GetIndices(pp, pBase); }
 HRESULT __stdcall ProxyDevice8::CreatePixelShader(const DWORD* pFunction, DWORD* pHandle)
-    { return m_real->CreatePixelShader(pFunction, pHandle); }
+{
+    const HRESULT hr = m_real->CreatePixelShader(pFunction, pHandle);
+
+    // Worth capturing for the same reason as the vertex shaders — the game
+    // assembles these at runtime too, so the bytecode exists nowhere on disk.
+    // It also decides how a draw is shaded: with a pixel shader bound, the
+    // fixed-function texture stage states are ignored entirely.
+    if (SUCCEEDED(hr) && pHandle && m_captureEnabled)
+    {
+        Registry::AddPixelShader((uint32_t)*pHandle, (const uint32_t*)pFunction);
+        const Registry::PixelShaderInfo* info =
+            Registry::FindPixelShader((uint32_t)*pHandle);
+        Logger::Log("[Render] CreatePixelShader handle=0x%X (%u tokens).",
+                    (unsigned)*pHandle,
+                    info ? (unsigned)info->function.size() : 0u);
+    }
+    return hr;
+}
 HRESULT __stdcall ProxyDevice8::GetPixelShader(DWORD* pHandle)
     { return m_real->GetPixelShader(pHandle); }
 HRESULT __stdcall ProxyDevice8::DeletePixelShader(DWORD Handle)
-    { return m_real->DeletePixelShader(Handle); }
+{
+    if (m_captureEnabled) Registry::RemovePixelShader((uint32_t)Handle);
+    return m_real->DeletePixelShader(Handle);
+}
 HRESULT __stdcall ProxyDevice8::SetPixelShaderConstant(DWORD R, const void* pData, DWORD C)
-    { return m_real->SetPixelShaderConstant(R, pData, C); }
+{
+    if (pData && C && R < kMaxPsConstants)
+    {
+        const DWORD count = (R + C > kMaxPsConstants) ? (kMaxPsConstants - R) : C;
+        memcpy(&m_state.psConstants[R][0], pData, (size_t)count * 4u * sizeof(float));
+        if (R + count > m_state.psConstantsHighWater)
+            m_state.psConstantsHighWater = R + count;
+    }
+    return m_real->SetPixelShaderConstant(R, pData, C);
+}
 HRESULT __stdcall ProxyDevice8::GetPixelShaderConstant(DWORD R, void* pData, DWORD C)
     { return m_real->GetPixelShaderConstant(R, pData, C); }
 HRESULT __stdcall ProxyDevice8::GetPixelShaderFunction(DWORD H, void* pData, DWORD* pSize)

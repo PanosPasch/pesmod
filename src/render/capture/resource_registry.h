@@ -23,6 +23,7 @@
 #include "../d3d8/d3d8_min.h"
 #include "../d3d8/d3d8_util.h"
 #include <cstdint>
+#include <vector>
 
 namespace Capture
 {
@@ -94,8 +95,11 @@ namespace Capture
         // layout lives in the declaration that created it — so the
         // declaration has to be kept or the layout of every draw using it
         // is unknowable.
+        // `function` is the shader bytecode, or null for a declaration-only
+        // handle. Its length is not passed in — D3D8 shader bytecode is
+        // self-terminating, ending with the 0x0000FFFF END token.
         void AddVertexShader(uint32_t handle, const uint32_t* declaration,
-                             bool hasFunction);
+                             const uint32_t* function);
         void RemoveVertexShader(uint32_t handle);
 
         struct VertexShaderInfo
@@ -103,6 +107,12 @@ namespace Capture
             uint32_t                     handle;
             bool                         hasFunction;  // true = real shader
             D3D8Util::VertexDeclLayout   layout;
+
+            // The shader bytecode, kept verbatim. pes6.exe assembles its
+            // vs.1.1 shaders at runtime via the statically linked D3DX8
+            // assembler, so this is the only place the compiled shader ever
+            // exists — it cannot be recovered from the executable.
+            std::vector<uint32_t>        function;
         };
 
         // Returns nullptr for an unknown handle — which includes anything
@@ -110,6 +120,23 @@ namespace Capture
         const VertexShaderInfo* FindVertexShader(uint32_t handle);
         uint32_t VertexShaderCount();
         const VertexShaderInfo* VertexShaderAt(uint32_t index);
+
+        // ── Pixel shaders ────────────────────────────────────────────────
+        // These matter for more than completeness: when a pixel shader is
+        // bound, the fixed-function texture stage states are ignored entirely.
+        // Reading the material model off D3DTSS_COLOROP is only valid for
+        // draws that have no pixel shader bound.
+        struct PixelShaderInfo
+        {
+            uint32_t              handle;
+            std::vector<uint32_t> function;
+        };
+
+        void AddPixelShader(uint32_t handle, const uint32_t* function);
+        void RemovePixelShader(uint32_t handle);
+        const PixelShaderInfo* FindPixelShader(uint32_t handle);
+        uint32_t PixelShaderCount();
+        const PixelShaderInfo* PixelShaderAt(uint32_t index);
 
         // Aggregate counters for the running per-frame summary.
         struct Totals

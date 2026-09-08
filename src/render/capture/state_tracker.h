@@ -9,15 +9,20 @@
 // set by *earlier* calls. This mirrors that state so each draw can be
 // captured with its full context attached.
 //
-// pes6.exe drives the pipeline entirely through fixed function — the binary
-// contains no shader bytecode at all — so the world/view/projection matrices
-// set via SetTransform are the real object transforms. That is what makes the
-// scene reconstructible for ray tracing.
+// pes6.exe uses two different pipelines, and the shadow has to cover both:
 //
-// It does not follow that everything uses an FVF. Menus do, but the 3D scene
-// binds a *vertex declaration* handle from CreateVertexShader(decl, NULL),
-// which describes a layout without being a shader. Both forms arrive through
-// the same `vertexShader` field below.
+//   • 2D menus and HUD — fixed function, bound with an FVF code. Here the
+//     SetTransform matrices are the real transforms.
+//
+//   • the 3D scene — real vs.1.1 vertex shaders, bound as a handle from
+//     CreateVertexShader with both a declaration *and* a function. The binary
+//     contains no shader bytecode because it assembles the sources at runtime
+//     through the statically linked D3DX8 assembler.
+//
+// The distinction matters for scene reconstruction: a vertex shader ignores
+// SetTransform entirely and takes its transforms from constant registers, so
+// for 3D draws it is `vsConstants` below — not `world`/`view`/`projection` —
+// that describes where the geometry actually lands.
 #pragma once
 
 #include "../d3d8/d3d8_min.h"
@@ -45,6 +50,14 @@ namespace Capture
     // function pipeline caps simultaneous lights well below this and the
     // game never approaches it.
     static const uint32_t kMaxTrackedLights = 16;
+
+    // Vertex shader constant registers we shadow. vs.1.1 guarantees at least
+    // 96, and that is where the real object/camera transforms live for this
+    // game — SetTransform does not drive shader-based draws.
+    static const uint32_t kMaxVsConstants = 96;
+
+    // ps.1.x exposes 8 constant registers (c0..c7).
+    static const uint32_t kMaxPsConstants = 8;
 
     struct DeviceState
     {
@@ -77,6 +90,15 @@ namespace Capture
         // the 3D scene, so both appear here.
         uint32_t vertexShader;
         uint32_t pixelShader;
+
+        // ── Vertex shader constants ──────────────────────────────────────
+        // c0..c95. `vsConstantsHighWater` is the highest register index ever
+        // written plus one, so the capture can dump only the live portion.
+        float    vsConstants[kMaxVsConstants][4];
+        uint32_t vsConstantsHighWater;
+
+        float    psConstants[kMaxPsConstants][4];
+        uint32_t psConstantsHighWater;
 
         // ── Misc ─────────────────────────────────────────────────────────
         D3DVIEWPORT8 viewport;

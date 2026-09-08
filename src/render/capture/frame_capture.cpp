@@ -26,6 +26,7 @@ namespace
     bool         g_capturing     = false;   // dumping the current frame
     std::string  g_frameDir;
     FILE*        g_drawsFile     = nullptr;
+    FILE*        g_vsConstFile   = nullptr;
     uint32_t     g_drawsWritten  = 0;
     bool         g_first3DSeen   = false;   // for the capture_on_first_3d trigger
 
@@ -442,8 +443,8 @@ namespace
         else if (decl)
         {
             stride = decl->layout.streamStride[0];
-            D3D8Util::VertexDeclDescribe(decl->layout, layoutDesc,
-                                         sizeof(layoutDesc));
+            D3D8Util::VertexDeclDescribe(decl->layout, !decl->hasFunction,
+                                         layoutDesc, sizeof(layoutDesc));
         }
         else
         {
@@ -453,6 +454,22 @@ namespace
         fprintf(f, "\"fvf\":\"0x%X\",", st.Fvf());
         fprintf(f, "\"layout\":\"%s\",", layoutDesc);
         fprintf(f, "\"stride\":%u,", stride);
+
+        // For a shader draw the constants are the transform, so every draw
+        // gets its own snapshot of the register file.
+        if (g_vsConstFile)
+        {
+            fwrite(&st.vsConstants[0][0], sizeof(float),
+                   (size_t)kMaxVsConstants * 4u, g_vsConstFile);
+            fprintf(f, "\"vsConstRecord\":%u,", g_drawsWritten);
+        }
+        fprintf(f, "\"vsConstHighWater\":%u,", st.vsConstantsHighWater);
+
+        // A bound pixel shader overrides the texture stage states below, so
+        // the "tss" block only describes the shading when this is 0.
+        fprintf(f, "\"ps\":\"0x%X\",", st.pixelShader);
+        fprintf(f, "\"tssAuthoritative\":%s,",
+                st.pixelShader == 0 ? "true" : "false");
 
         fprintf(f, "\"indexed\":%s,", info.indexed ? "true" : "false");
         fprintf(f, "\"userPointer\":%s,", info.userPointer ? "true" : "false");
@@ -542,13 +559,51 @@ namespace
         std::string sub = g_frameDir + "\\buffers";  EnsureDirectory(sub.c_str());
         sub = g_frameDir + "\\textures";             EnsureDirectory(sub.c_str());
 
+        sub = g_frameDir + "\\shaders";              EnsureDirectory(sub.c_str());
+
         std::string drawsPath = g_frameDir + "\\draws.json";
         fopen_s(&g_drawsFile, drawsPath.c_str(), "w");
         if (g_drawsFile) fprintf(g_drawsFile, "[");
         g_drawsWritten = 0;
         g_dumpedResources.clear();
 
-        Logger::Log("[Capture] Capturing frame %u to %s", g_frameIndex, dir);
+        // The vs.1.1 shaders are assembled at runtime through the statically
+        // linked D3DX8 assembler, so this dump is the only place the compiled
+        // bytecode exists — it cannot be recovered from the executable.
+        uint32_t shadersDumped = 0;
+        for (uint32_t i = 0; i < Registry::VertexShaderCount(); ++i)
+        {
+            const Registry::VertexShaderInfo* vs = Registry::VertexShaderAt(i);
+            if (!vs || vs->function.empty()) continue;
+            char shaderPath[MAX_PATH];
+            _snprintf_s(shaderPath, sizeof(shaderPath), _TRUNCATE,
+                        "%s\\shaders\\vs_%04X.bin", g_frameDir.c_str(),
+                        vs->handle);
+            if (DumpBufferBytes(shaderPath, vs->function.data(),
+                                (uint32_t)(vs->function.size() * sizeof(uint32_t))))
+                ++shadersDumped;
+        }
+        for (uint32_t i = 0; i < Registry::PixelShaderCount(); ++i)
+        {
+            const Registry::PixelShaderInfo* ps = Registry::PixelShaderAt(i);
+            if (!ps || ps->function.empty()) continue;
+            char shaderPath[MAX_PATH];
+            _snprintf_s(shaderPath, sizeof(shaderPath), _TRUNCATE,
+                        "%s\\shaders\\ps_%04X.bin", g_frameDir.c_str(),
+                        ps->handle);
+            if (DumpBufferBytes(shaderPath, ps->function.data(),
+                                (uint32_t)(ps->function.size() * sizeof(uint32_t))))
+                ++shadersDumped;
+        }
+
+        // One fixed-size record of the constant register file per draw,
+        // appended in draw order. Fixed size keeps the file trivially
+        // indexable by draw number.
+        std::string constPath = g_frameDir + "\\vs_constants.bin";
+        fopen_s(&g_vsConstFile, constPath.c_str(), "wb");
+
+        Logger::Log("[Capture] Capturing frame %u to %s (%u vertex shaders "
+                    "dumped)", g_frameIndex, dir, shadersDumped);
     }
 
     void CloseCaptureFrame(IDirect3DDevice8* realDevice)
@@ -559,6 +614,7 @@ namespace
             fclose(g_drawsFile);
             g_drawsFile = nullptr;
         }
+        if (g_vsConstFile) { fclose(g_vsConstFile); g_vsConstFile = nullptr; }
 
         // ── manifest.json ────────────────────────────────────────────────
         std::string manifestPath = g_frameDir + "\\manifest.json";
@@ -597,6 +653,35 @@ namespace
         fprintf(f, "    \"distinctFvf\": %u, \"distinctTextures\": %u\n",
                 s.distinctFvfCount, s.distinctTextureCount);
         fprintf(f, "  },\n");
+
+        fprintf(f, "  \"vertexShaderConstants\": {\"file\":\"vs_constants.bin\","
+                   "\"registersPerRecord\":%u,\"bytesPerRecord\":%u,"
+                   "\"records\":%u,\"note\":\"one record per draw, in draw "
+                   "order; float4 per register\"},\n",
+                (unsigned)kMaxVsConstants, (unsigned)(kMaxVsConstants * 16),
+                g_drawsWritten);
+
+        fprintf(f, "  \"vertexShaders\": [");
+        bool firstVs = true;
+        for (uint32_t i = 0; i < Registry::VertexShaderCount(); ++i)
+        {
+            const Registry::VertexShaderInfo* vs = Registry::VertexShaderAt(i);
+            if (!vs) continue;
+            char d[256];
+            fprintf(f, "%s\n    {\"handle\":\"0x%X\",\"hasFunction\":%s,"
+                       "\"tokens\":%u,\"stride\":%u,\"layout\":\"%s\"",
+                    firstVs ? "" : ",", vs->handle,
+                    vs->hasFunction ? "true" : "false",
+                    (unsigned)vs->function.size(),
+                    vs->layout.streamStride[0],
+                    D3D8Util::VertexDeclDescribe(vs->layout, !vs->hasFunction,
+                                                 d, sizeof(d)));
+            if (!vs->function.empty())
+                fprintf(f, ",\"file\":\"shaders/vs_%04X.bin\"", vs->handle);
+            fprintf(f, "}");
+            firstVs = false;
+        }
+        fprintf(f, "\n  ],\n");
 
         if (s.worldBoundsValid)
             fprintf(f, "  \"objectOriginBounds\": {\"min\":[%.4f,%.4f,%.4f],"
@@ -694,7 +779,8 @@ bool Init(const char* outputDir)
 void Shutdown()
 {
     if (!g_initialised) return;
-    if (g_drawsFile) { fclose(g_drawsFile); g_drawsFile = nullptr; }
+    if (g_drawsFile)   { fclose(g_drawsFile);   g_drawsFile   = nullptr; }
+    if (g_vsConstFile) { fclose(g_vsConstFile); g_vsConstFile = nullptr; }
     g_initialised = false;
 }
 
@@ -1012,7 +1098,9 @@ void WriteSessionReport(const char* path)
             if (info)
                 fprintf(f, "| `0x%X` | declaration%s | %s | %u | world (3D) |\n",
                         arg, info->hasFunction ? " + shader" : "",
-                        D3D8Util::VertexDeclDescribe(info->layout, d, sizeof(d)),
+                        D3D8Util::VertexDeclDescribe(info->layout,
+                                                     !info->hasFunction,
+                                                     d, sizeof(d)),
                         info->layout.streamStride[0]);
             else
                 fprintf(f, "| `0x%X` | declaration | *(created before hook)* "
@@ -1034,7 +1122,9 @@ void WriteSessionReport(const char* path)
             char d[256];
             fprintf(f, "| `0x%X` | %s | %s | %u |\n", info->handle,
                     info->hasFunction ? "yes" : "no (fixed function)",
-                    D3D8Util::VertexDeclDescribe(info->layout, d, sizeof(d)),
+                    D3D8Util::VertexDeclDescribe(info->layout,
+                                                 !info->hasFunction,
+                                                 d, sizeof(d)),
                     info->layout.streamStride[0]);
         }
     }

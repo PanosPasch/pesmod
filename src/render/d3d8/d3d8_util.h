@@ -4,9 +4,10 @@
 // into a concrete vertex layout, sizing surfaces, and turning enum values
 // into readable names for the capture log and the generated report.
 //
-// pes6.exe has no vertex shaders at all, so the FVF *is* the complete vertex
-// declaration for every draw in the game. Getting FvfDecode right is what
-// makes geometry extraction possible.
+// pes6.exe uses both of D3D8's vertex-format mechanisms: FVF codes for its 2D
+// menu and HUD draws, and vertex declarations bound to runtime-assembled
+// vs.1.1 shaders for the 3D scene. Both paths have to be decodable here for
+// geometry extraction to work.
 #pragma once
 
 #include "d3d8_min.h"
@@ -54,11 +55,14 @@ namespace D3D8Util
 
     // ── Vertex declarations ──────────────────────────────────────────────
     // D3D8 overloads SetVertexShader: it takes either an FVF code or a handle
-    // from CreateVertexShader. Crucially, CreateVertexShader accepts a
-    // declaration with pFunction == NULL, which creates a pure *vertex
-    // declaration* driving the fixed-function pipeline — no shader bytecode
-    // involved. That is why a binary can contain zero shader version tokens
-    // and still never use an FVF for its main geometry.
+    // from CreateVertexShader. A declaration passed with pFunction == NULL
+    // creates a pure *vertex declaration* driving the fixed-function pipeline;
+    // passed with a function it describes the inputs of a real vertex shader.
+    //
+    // pes6.exe does the latter for its 3D scene. The binary contains no shader
+    // bytecode because it links the D3DX8 shader assembler and assembles
+    // vs.1.1 sources at runtime — which is why scanning for compiled shader
+    // version tokens finds nothing.
     //
     // The declaration is a DWORD token stream terminated by 0xFFFFFFFF.
 
@@ -91,8 +95,16 @@ namespace D3D8Util
     bool VertexDeclDecode(const uint32_t* decl, uint32_t maxTokens,
                           VertexDeclLayout& out);
 
-    // A one-line summary, e.g. "s0: POSITION:float3 DIFFUSE:d3dcolor TEX0:float2 (24B)".
+    // A one-line summary of the layout.
+    //
+    // `semanticNames` selects how registers are labelled. A declaration used
+    // with the *fixed-function* pipeline binds registers by fixed semantics
+    // (D3DVSDE_POSITION == 0, D3DVSDE_NORMAL == 3, ...), so those names are
+    // meaningful. A declaration feeding a real vertex shader binds plain
+    // input registers v0..v15 that the shader may use for anything, so
+    // labelling v1 "BLENDWEIGHT" there is actively misleading — pass false.
     const char* VertexDeclDescribe(const VertexDeclLayout& layout,
+                                   bool semanticNames,
                                    char* buf, size_t bufSize);
 
     const char* VertexDeclTypeName(uint32_t type);

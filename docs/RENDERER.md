@@ -52,36 +52,48 @@ The 32-bit side never touches Vulkan. It observes, extracts and forwards.
 ---
 
 ## 2. The game's Direct3D 8 engine
+### 2.1 Two pipelines, not one
 
-### 2.1 It is pure fixed-function
+`pes6.exe` imports exactly one graphics entry point, `Direct3DCreate8`, and
+scanning the binary for compiled shader version tokens (`0xFFFE0101` and
+friends) finds **none**. It is tempting to conclude the game is pure fixed
+function. It is not, and the capture proved it.
 
-`pes6.exe` imports exactly one graphics entry point: `Direct3DCreate8`, and the
-binary contains **no vertex shader bytecode at all**. All transformation and
-lighting is fixed-function, so the object and camera transforms are plain
-`SetTransform` matrices rather than being buried in shader constants. The scene
-is therefore *reconstructible* — the property that makes fixed-function DX8/DX9
-titles the class of game RTX Remix targets.
+The binary statically links the **D3DX8 shader assembler** — its opcode table
+(`rsq add dp4 m4x4 sub sge dp3 m3x3 m4x3 mul mad mov vs.1.1`, `oPos`, `oFog`,
+`c%d`) and its error strings ("D3DX8 Shader Assembler Version 0.91",
+"coissue not supported in vertex shaders") are both present. The game
+**assembles vs.1.1 shaders at runtime**, which is exactly why no compiled
+bytecode appears on disk.
 
-**But "no shaders" does not mean "everything uses an FVF."** `SetVertexShader`
-is overloaded in D3D8: it accepts either an FVF code or a handle from
-`CreateVertexShader`. Crucially, `CreateVertexShader(declaration, NULL, ...)`
-— with a *null function pointer* — creates a pure **vertex declaration** that
-drives the fixed-function pipeline. No shader is involved, which is why the
-binary can contain zero shader version tokens and still never use an FVF for
-its main geometry.
+Measured from a real match frame, the game runs two pipelines side by side:
 
-Measured from a real match frame, the game uses both forms:
+| Path | Vertex format | Transform source | Draws |
+| ---- | ------------- | ---------------- | ----: |
+| 2D menus / HUD | FVF `0x104`, `0x144`, `0x44` | pre-transformed (`XYZRHW`) | 22 |
+| 3D scene, shader | declaration + **vs.1.1 shader** | **shader constants** | 422 |
+| 3D scene, fixed function | FVF `0x142` | `SetTransform` | 16 |
 
-| Path | Vertex format | Draw call |
-| ---- | ------------- | --------- |
-| 2D menus / HUD | FVF `0x104`, `0x144` | `DrawPrimitiveUP` |
-| 3D scene | **vertex declaration handle** | `DrawIndexedPrimitive` |
+**This changes where the transforms live.** A vertex shader ignores
+`SetTransform` entirely and reads its matrices from constant registers, so for
+the 422 shader-driven draws the `world`/`view`/`projection` matrices are not
+authoritative — `SetVertexShaderConstant` is. The capture therefore shadows
+c0..c95 and snapshots the whole register file per draw.
 
-This mattered: an early version of the capture recorded only the decoded FVF,
-so every 3D draw came back as `fvf 0x0` — indistinguishable from "no vertex
-format bound". The capture now records the raw `SetVertexShader` argument, its
-kind (`fvf` / `declaration` / `none`), and decodes declaration token streams
-into a concrete element layout.
+Two capture bugs came out of this, both now fixed:
+
+- Recording only the decoded FVF made every shader draw report `fvf 0x0`,
+  indistinguishable from "no vertex format bound". The raw `SetVertexShader`
+  argument and its kind (`fvf` / `declaration` / `none`) are now both recorded.
+- Declaration registers were labelled with fixed-function semantics
+  (`POSITION`, `BLENDWEIGHT`, `NORMAL`…). Those names only mean something for a
+  declaration used *without* a shader. With a shader bound they are plain input
+  registers `v0..v15`, so labelling `v1` "BLENDWEIGHT" invented structure that
+  was not there. Shader-bound declarations now print as `v0..vN`.
+
+The scene is still reconstructible — the geometry, transforms and materials are
+all observable — but through shader constants rather than the fixed-function
+transform stack.
 
 ### 2.2 The device layer
 
@@ -272,7 +284,9 @@ in a contemporary game.
 ### 4.2 The 3D vertex layout
 
 The declaration-bound geometry is **24 bytes per vertex**, confirmed by
-decoding the raw buffer bytes rather than trusting the declaration alone:
+decoding the raw buffer bytes rather than trusting the declaration alone —
+which was fortunate, since the declaration's register *names* turned out to be
+mislabelled while the byte layout derived here was correct:
 
 | Offset | Field | Evidence |
 | -----: | ----- | -------- |
@@ -299,11 +313,19 @@ Uniform across all 438 world-space draws:
 | Stage 0 `COLOROP` | `MODULATE` | |
 | Stage 1 `COLOROP` | `DISABLE` | a single texture stage |
 
-So the game's entire shading model is:
+So for any draw with **no pixel shader bound**, the shading model is:
 
 ```
 pixel = texture(uv) x vertexColour
 ```
+
+**Caveat, and why the next capture matters.** A bound pixel shader overrides
+the texture stage states completely, so `D3DTSS_COLOROP` only describes the
+shading when `SetPixelShader(0)` is in effect. The frame these numbers come
+from was captured before pixel-shader binding was recorded, and the binary
+does contain `ps.1.x` assembler support — so this model is confirmed only for
+draws that turn out to have no pixel shader. Each draw record now carries
+`"ps"` and a `"tssAuthoritative"` flag so the distinction is explicit.
 
 **There are no normals anywhere in the pipeline** — not in the vertex format,
 and no lights are ever set. All illumination is pre-baked into the vertex
@@ -347,6 +369,8 @@ honest reporting of resources that could not be read back.
   affected one 3840x2160 surface.
 - Vertex declarations created before the hook is installed cannot be resolved;
   draws using them classify as `unknown`.
+- The material model in 4.3 is confirmed only for draws with no pixel shader
+  bound. Pixel-shader capture exists but has not yet been exercised in-game.
 - `ApplyStateBlock` would desynchronise the shadow. The game does not use state
   blocks, and the proxy logs a one-time warning if that ever changes.
 

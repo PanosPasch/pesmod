@@ -17,6 +17,19 @@ namespace
     // Keyed by SetVertexShader handle. Ordered so the report lists them
     // deterministically.
     std::map<uint32_t, Capture::Registry::VertexShaderInfo> g_vertexShaders;
+    std::map<uint32_t, Capture::Registry::PixelShaderInfo>  g_pixelShaders;
+
+    // D3D8 shader bytecode is self-terminating, ending with 0x0000FFFF; the
+    // cap only guards against a malformed stream. Shared by both shader kinds.
+    uint32_t ShaderTokenLength(const uint32_t* function)
+    {
+        const uint32_t kMaxShaderTokens = 4096;
+        const uint32_t kEndToken        = 0x0000FFFFu;
+        uint32_t count = 0;
+        while (count < kMaxShaderTokens)
+            if (function[count++] == kEndToken) break;
+        return count;
+    }
 
     Capture::ResourceInfo& Append(Capture::ResourceKind kind, void* object)
     {
@@ -51,6 +64,7 @@ void Reset()
     g_resources.clear();
     g_byPointer.clear();
     g_vertexShaders.clear();
+    g_pixelShaders.clear();
     g_nextId = 1;
 }
 
@@ -140,17 +154,23 @@ const ResourceInfo* At(uint32_t index)
 
 // ── Vertex declarations ──────────────────────────────────────────────────
 void AddVertexShader(uint32_t handle, const uint32_t* declaration,
-                     bool hasFunction)
+                     const uint32_t* function)
 {
     VertexShaderInfo info;
-    memset(&info, 0, sizeof(info));
     info.handle      = handle;
-    info.hasFunction = hasFunction;
+    info.hasFunction = (function != nullptr);
+    // memset is not an option here: VertexShaderInfo owns a std::vector.
+    memset(&info.layout, 0, sizeof(info.layout));
 
-    // 512 tokens is far beyond any real fixed-function declaration and keeps
-    // a malformed or non-terminated stream from running off into free memory.
+    // 512 tokens is far beyond any real declaration and keeps a malformed or
+    // non-terminated stream from running off into free memory.
     if (declaration)
         D3D8Util::VertexDeclDecode(declaration, 512, info.layout);
+
+    // D3D8 shader bytecode is self-terminating: a version token, then
+    // instructions, then 0x0000FFFF.
+    if (function)
+        info.function.assign(function, function + ShaderTokenLength(function));
 
     g_vertexShaders[handle] = info;
 }
@@ -177,6 +197,42 @@ const VertexShaderInfo* VertexShaderAt(uint32_t index)
     if (index >= g_vertexShaders.size()) return nullptr;
     std::map<uint32_t, VertexShaderInfo>::const_iterator it =
         g_vertexShaders.begin();
+    std::advance(it, index);
+    return &it->second;
+}
+
+// ── Pixel shaders ────────────────────────────────────────────────────────
+void AddPixelShader(uint32_t handle, const uint32_t* function)
+{
+    PixelShaderInfo info;
+    info.handle = handle;
+    if (function)
+        info.function.assign(function, function + ShaderTokenLength(function));
+    g_pixelShaders[handle] = info;
+}
+
+void RemovePixelShader(uint32_t handle)
+{
+    g_pixelShaders.erase(handle);
+}
+
+const PixelShaderInfo* FindPixelShader(uint32_t handle)
+{
+    std::map<uint32_t, PixelShaderInfo>::const_iterator it =
+        g_pixelShaders.find(handle);
+    return (it == g_pixelShaders.end()) ? nullptr : &it->second;
+}
+
+uint32_t PixelShaderCount()
+{
+    return (uint32_t)g_pixelShaders.size();
+}
+
+const PixelShaderInfo* PixelShaderAt(uint32_t index)
+{
+    if (index >= g_pixelShaders.size()) return nullptr;
+    std::map<uint32_t, PixelShaderInfo>::const_iterator it =
+        g_pixelShaders.begin();
     std::advance(it, index);
     return &it->second;
 }

@@ -297,6 +297,7 @@ const char* VertexRegisterName(uint32_t reg)
 }
 
 const char* VertexDeclDescribe(const VertexDeclLayout& layout,
+                               bool semanticNames,
                                char* buf, size_t bufSize)
 {
     if (!layout.valid)
@@ -320,8 +321,15 @@ const char* VertexDeclDescribe(const VertexDeclLayout& layout,
                             "%ss%u:", used ? " " : "", e.stream);
             if (n > 0) used += (size_t)n;
         }
+        char regName[24];
+        if (semanticNames)
+            _snprintf_s(regName, sizeof(regName), _TRUNCATE, "%s",
+                        VertexRegisterName(e.reg));
+        else
+            _snprintf_s(regName, sizeof(regName), _TRUNCATE, "v%u", e.reg);
+
         n = _snprintf_s(buf + used, bufSize - used, _TRUNCATE, " %s:%s",
-                        VertexRegisterName(e.reg), VertexDeclTypeName(e.type));
+                        regName, VertexDeclTypeName(e.type));
         if (n > 0) used += (size_t)n;
     }
 
