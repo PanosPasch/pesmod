@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Host
@@ -104,6 +105,16 @@ namespace Host
 
         const ReceiverStats& Stats() const { return m_stats; }
 
+        // True if this geometry id was received at some point, even if it has
+        // since been evicted. An unresolved instance whose id was never
+        // received means the producer never sent it; one whose id *was*
+        // received means the caches fell out of sync. Those are different
+        // bugs and the distinction is not otherwise visible.
+        bool WasEverReceived(uint64_t geometryId) const
+        {
+            return m_everReceived.count(geometryId) != 0;
+        }
+
         // Producer-side counters, read straight out of the shared header.
         // A non-zero drop count means the host is not keeping up.
         uint64_t ProducerFramesDropped() const;
@@ -117,6 +128,8 @@ namespace Host
 
         std::unordered_map<uint64_t, Geometry> m_geometry;
         std::unordered_map<uint64_t, Texture>  m_textures;
+
+        std::unordered_set<uint64_t> m_everReceived;
 
         Frame          m_frame;      // most recently completed frame
         Frame          m_building;   // frame currently being assembled

@@ -92,6 +92,7 @@ void SceneReceiver::HandleMessage(const uint8_t* msg, uint32_t bytes)
         g.dirty = true;
 
         m_residentBytes += (g.vertices.size() + g.indices.size());
+        m_everReceived.insert(d->geometryId);
         ++m_stats.geometryUploads;
         break;
     }

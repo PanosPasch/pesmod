@@ -67,11 +67,19 @@ namespace
         const Host::Frame& f = rx.CurrentFrame();
 
         uint64_t triangles = 0;
-        uint32_t resolved = 0, missing = 0;
+        uint32_t resolved = 0, missing = 0, evicted = 0, neverSent = 0;
         for (size_t i = 0; i < f.instances.size(); ++i)
         {
             const Host::Geometry* g = rx.FindGeometry(f.instances[i].geometryId);
-            if (!g) { ++missing; continue; }
+            if (!g)
+            {
+                ++missing;
+                // Splits a cache-coherence failure from a producer that
+                // never sent the geometry in the first place.
+                if (rx.WasEverReceived(f.instances[i].geometryId)) ++evicted;
+                else                                              ++neverSent;
+                continue;
+            }
             ++resolved;
             const uint32_t idx = g->desc.indexCount ? g->desc.indexCount
                                                     : g->desc.vertexCount;
@@ -87,9 +95,8 @@ namespace
                rx.ResidentBytes() / (1024.0 * 1024.0));
 
         if (missing)
-            printf("    WARNING: %u instance(s) reference geometry the host "
-                   "has not received - producer may be dropping messages\n",
-                   missing);
+            printf("    WARNING: %u unresolved (%u evicted-then-reused, "
+                   "%u never sent)\n", missing, evicted, neverSent);
     }
 
     void ReportSummary(const Host::SceneReceiver& rx)
