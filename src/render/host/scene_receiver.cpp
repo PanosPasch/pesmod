@@ -194,6 +194,41 @@ void SceneReceiver::HandleMessage(const uint8_t* msg, uint32_t bytes)
     }
 }
 
+uint32_t SceneReceiver::EvictUnused(uint64_t retentionFrames)
+{
+    const uint64_t now = m_frame.begin.frameIndex;
+    if (now < retentionFrames) return 0;   // not enough history yet
+    const uint64_t cutoff = now - retentionFrames;
+
+    uint32_t dropped = 0;
+
+    for (auto it = m_geometry.begin(); it != m_geometry.end(); )
+    {
+        if (it->second.lastUsedFrame < cutoff)
+        {
+            m_residentBytes -= (it->second.vertices.size() + it->second.indices.size());
+            it = m_geometry.erase(it);
+            ++dropped;
+            ++m_stats.geometryEvicted;
+        }
+        else ++it;
+    }
+
+    for (auto it = m_textures.begin(); it != m_textures.end(); )
+    {
+        if (it->second.lastUsedFrame < cutoff)
+        {
+            m_residentBytes -= it->second.pixels.size();
+            it = m_textures.erase(it);
+            ++dropped;
+            ++m_stats.texturesEvicted;
+        }
+        else ++it;
+    }
+
+    return dropped;
+}
+
 bool SceneReceiver::Poll(uint32_t maxMessages)
 {
     if (!m_ring.IsOpen()) return false;

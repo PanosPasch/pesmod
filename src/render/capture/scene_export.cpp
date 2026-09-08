@@ -38,6 +38,30 @@ namespace
     uint32_t g_droppedThisFrame   = 0;
     uint64_t g_frameIndex         = 0;
 
+    // ── Geometry id churn diagnostic ─────────────────────────────────────
+    // The host's geometry cache was observed growing without bound (~8-15 new
+    // ids per frame forever) while the instance count stayed flat, which means
+    // some logical mesh is being handed a fresh id every frame. Since one id
+    // is meant to become one BLAS, that has to be understood before the
+    // acceleration structures are built.
+    //
+    // Rather than guess which component of the id is churning, this groups
+    // draws by a *reduced* key that ignores all the buffer offsets. If one
+    // reduced key maps to many full ids, the offsets are the culprit and this
+    // records which ones actually moved.
+    struct ChurnRecord
+    {
+        uint32_t distinctIds;
+        uint32_t firstStartIndex,  lastStartIndex;
+        uint32_t firstMinIndex,    lastMinIndex;
+        uint32_t firstBaseVertex,  lastBaseVertex;
+        uint32_t firstStartVertex, lastStartVertex;
+        uint32_t firstContentHash, lastContentHash;
+        uint64_t lastFullId;
+    };
+    std::unordered_map<uint64_t, ChurnRecord> g_churn;
+    const uint32_t kChurnReportInterval = 900;   // ~15s at 60fps
+
     // ── Hashing ──────────────────────────────────────────────────────────
     inline uint64_t Mix64(uint64_t h, uint64_t v)
     {
@@ -76,6 +100,79 @@ namespace
         h = Mix64(h, baseVertex);
         h = Mix64(h, stride);
         return h ? h : 1ull;   // never hand out 0; the host treats it as "none"
+    }
+
+    // Records one draw against a key that deliberately excludes every buffer
+    // offset, so a key with many distinct ids proves the offsets are what is
+    // churning — and the first/last samples say which ones moved.
+    void RecordChurn(uint32_t vbId, uint32_t ibId, const DrawCallInfo& info,
+                     uint32_t vertexCount, uint32_t baseVertex,
+                     uint64_t fullId, uint32_t contentHash)
+    {
+        uint64_t reduced = 0xcbf29ce484222325ull;
+        reduced = Mix64(reduced, vbId);
+        reduced = Mix64(reduced, ibId);
+        reduced = Mix64(reduced, info.primitiveCount);
+        reduced = Mix64(reduced, vertexCount);
+
+        ChurnRecord& r = g_churn[reduced];
+        if (r.distinctIds == 0)
+        {
+            r.firstStartIndex  = info.startIndex;
+            r.firstMinIndex    = info.minIndex;
+            r.firstBaseVertex  = baseVertex;
+            r.firstStartVertex = info.startVertex;
+            r.firstContentHash = contentHash;
+            r.distinctIds      = 1;
+            r.lastFullId       = fullId;
+        }
+        else if (fullId != r.lastFullId)
+        {
+            ++r.distinctIds;
+            r.lastFullId = fullId;
+        }
+        r.lastStartIndex  = info.startIndex;
+        r.lastMinIndex    = info.minIndex;
+        r.lastBaseVertex  = baseVertex;
+        r.lastStartVertex = info.startVertex;
+        r.lastContentHash = contentHash;
+    }
+
+    void ReportChurn()
+    {
+        // Only the worst offenders matter; a mesh with a stable id has 1.
+        const ChurnRecord* worst[3] = { nullptr, nullptr, nullptr };
+        uint32_t stableKeys = 0, churningKeys = 0;
+        for (auto it = g_churn.begin(); it != g_churn.end(); ++it)
+        {
+            const ChurnRecord& r = it->second;
+            if (r.distinctIds <= 1) { ++stableKeys; continue; }
+            ++churningKeys;
+            for (int s = 0; s < 3; ++s)
+                if (!worst[s] || r.distinctIds > worst[s]->distinctIds)
+                {
+                    for (int m = 2; m > s; --m) worst[m] = worst[m - 1];
+                    worst[s] = &r;
+                    break;
+                }
+        }
+
+        Logger::Log("[Export] geometry id churn: %u stable keys, %u churning "
+                    "(cache holds %u ids)", stableKeys, churningKeys,
+                    (uint32_t)g_sentGeometry.size());
+        for (int s = 0; s < 3 && worst[s]; ++s)
+        {
+            const ChurnRecord& r = *worst[s];
+            Logger::Log("  #%d: %u ids for one mesh | startIndex %u->%u | "
+                        "minIndex %u->%u | baseVertex %u->%u | "
+                        "startVertex %u->%u | contentHash %08X->%08X",
+                        s + 1, r.distinctIds,
+                        r.firstStartIndex,  r.lastStartIndex,
+                        r.firstMinIndex,    r.lastMinIndex,
+                        r.firstBaseVertex,  r.lastBaseVertex,
+                        r.firstStartVertex, r.lastStartVertex,
+                        r.firstContentHash, r.lastContentHash);
+        }
     }
 
     uint32_t TranslateTextureFormat(D3DFORMAT fmt)
@@ -330,6 +427,9 @@ void EndFrame()
         ++g_stats.framesSent;
     else
         ++g_stats.writeFailures;
+
+    if (g_stats.framesSent && (g_stats.framesSent % kChurnReportInterval) == 0)
+        ReportChurn();
 }
 
 void UpdateLighting(const DeviceState& state)
@@ -434,6 +534,10 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
     // in place and the buffer id alone would look unchanged.
     const uint32_t contentHash = HashBytes(g_vertexScratch.data(),
                                            g_vertexScratch.size());
+
+    RecordChurn(vbInfo->id, ibInfo ? ibInfo->id : 0u, info, vertexCount,
+                state.baseVertexIndex, geometryId, contentHash);
+
     auto sent = g_sentGeometry.find(geometryId);
     if (sent == g_sentGeometry.end() || sent->second != contentHash)
     {

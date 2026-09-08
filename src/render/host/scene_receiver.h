@@ -59,6 +59,8 @@ namespace Host
         uint64_t textureUploads;
         uint64_t bytesReceived;
         uint64_t malformedMessages;
+        uint64_t geometryEvicted;
+        uint64_t texturesEvicted;
     };
 
     class SceneReceiver
@@ -83,6 +85,18 @@ namespace Host
 
         const Geometry* FindGeometry(uint64_t id) const;
         const Texture*  FindTexture(uint64_t id) const;
+
+        // Drops cached resources not referenced for `retentionFrames`.
+        //
+        // This is not just a memory concern. One geometry is meant to become
+        // one BLAS, so an unbounded cache means an unbounded number of
+        // acceleration structures — the cache has been observed growing by
+        // 8-15 entries per frame indefinitely while the instance count stayed
+        // flat. Eviction bounds that; whether the underlying id churn is
+        // itself a bug is a separate question the producer diagnoses.
+        //
+        // Returns the number of entries dropped.
+        uint32_t EvictUnused(uint64_t retentionFrames);
 
         size_t GeometryCount() const { return m_geometry.size(); }
         size_t TextureCount()  const { return m_textures.size(); }

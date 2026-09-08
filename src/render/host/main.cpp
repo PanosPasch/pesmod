@@ -43,6 +43,7 @@ namespace
             "  --section <name>   shared section to attach to\n"
             "                     (default: %s)\n"
             "  --frames <n>       exit after n completed frames (0 = run until Ctrl-C)\n"
+            "  --retain <frames>  drop cached geometry unused this long (default 300)\n"
             "  --quiet            only print the summary\n"
             "  --probe            create the Vulkan RT device, report, exit\n"
             "  --no-validation    disable Vulkan validation layers\n"
@@ -140,6 +141,7 @@ int main(int argc, char** argv)
 {
     const char* section = SceneIPC::kDefaultSectionName;
     uint64_t    maxFrames = 0;
+    uint64_t    retention = 300;   // frames a cached resource survives unused
     bool        quiet = false;
     bool        probeOnly = false;
     bool        validation = true;
@@ -149,6 +151,8 @@ int main(int argc, char** argv)
         if (!strcmp(argv[i], "--section") && i + 1 < argc) section = argv[++i];
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
             maxFrames = strtoull(argv[++i], nullptr, 10);
+        else if (!strcmp(argv[i], "--retain") && i + 1 < argc)
+            retention = strtoull(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--quiet")) quiet = true;
         else if (!strcmp(argv[i], "--probe")) probeOnly = true;
         else if (!strcmp(argv[i], "--no-validation")) validation = false;
@@ -206,6 +210,10 @@ int main(int argc, char** argv)
             Sleep(1);
             continue;
         }
+
+        // One geometry becomes one BLAS, so an unbounded cache is an
+        // unbounded number of acceleration structures, not merely wasted RAM.
+        if (retention) rx.EvictUnused(retention);
 
         if (!quiet) ReportFrame(rx);
         ++reported;
