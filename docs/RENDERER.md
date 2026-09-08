@@ -427,10 +427,80 @@ honest reporting of resources that could not be read back.
   blocks, and the proxy logs a one-time warning if that ever changes.
 
 ---
-## 6. Roadmap
+## 6. The render host
 
-The lighting and transform questions are now answered from captured data, so
-what remains is mostly construction rather than investigation.
+`src/render/host/` is the 64-bit half. It is a separate CMake project because
+one CMake generate cannot emit both Win32 and x64 binaries:
+
+```
+cmake -S src/render/host -B build-host -A x64
+cmake --build build-host --config Release
+build-host/Release/PESModHost.exe --probe
+```
+
+### 6.1 Transport
+
+`src/render/ipc/` is compiled into *both* the 32-bit ASI and the 64-bit host,
+so its structures must have identical layout under both ABIs. A pointer,
+`size_t`, bare `long`, or implicit padding would give the two sides different
+readings of the same bytes — and the failure mode is not a crash but silently
+wrong geometry. Every struct therefore uses fixed-width fields with explicit
+padding, and every size, alignment and offset a bitness mistake would shift is
+asserted at compile time, in both builds.
+
+`ipc_selftest.cpp` checks this empirically rather than by inspection: built
+both ways, the 32-bit producer writes a known stream and the 64-bit consumer
+verifies every field, using ids with the high dword set (`0xDEADBEEF12345678`)
+since truncation there is exactly what a mis-declared field causes.
+
+One reliable byte ring carries two classes of traffic. Resource messages
+(geometry, textures) are never dropped — the host cannot render an instance
+whose vertices never arrived — while frame messages are dropped freely under
+back-pressure, because the next frame supersedes them. Nothing blocks the
+game's render thread.
+
+### 6.2 What the producer sends
+
+Geometry is keyed by a hash of the draw's *slice* of its buffers rather than
+by the buffer: many draws share one vertex buffer and differ only by index
+range, and each slice is its own mesh for BLAS purposes. Each slice's vertex
+range is hashed every frame and re-uploaded when it changes, which is what
+makes animated players work — the game skins on the CPU, so their vertices are
+rewritten in place and buffer identity alone would look unchanged.
+
+Instances carry the raw WVP from `c58..c61` as `clipTransform`. A separate
+world matrix does not exist for shader draws, so rather than guess at a
+factorisation on the game's render thread, the host divides out the shared
+camera. The handful of genuinely fixed-function draws also carry a real
+`worldTransform`, flagged `kInstanceWorldValid`, which gives the host a
+known-good answer to check its factorisation against.
+
+### 6.3 The Vulkan device
+
+Ray tracing is required, not optional — an adapter without it has nothing to
+offer a process that exists solely because RT is unreachable in the game — so
+device selection rejects such adapters and says which extensions or features
+were missing. Measured on this machine:
+
+```
+device            NVIDIA GeForce RTX 4090 Laptop GPU
+api version       1.3.260          device-local mem  15.7 GB
+shader group handle size / alignment   32 / 32
+shader group base alignment            64
+max ray recursion depth                31
+max geometry / instance / primitive    16777215 / 16777215 / 536870911
+```
+
+The Intel integrated GPU is enumerated and correctly rejected. All ten
+acceleration-structure and ray-pipeline entry points resolve through
+`vkGetDeviceProcAddr`; none is exported by the loader library.
+
+---
+
+## 7. Roadmap
+
+The lighting and transform questions are answered from captured data, and the
+transport and device are up, so what remains is mostly construction.
 
 1. **Capture a shader-driven match frame.** The frames captured so far predate
    shader-constant capture, so the c58 transforms and the lighting rig were

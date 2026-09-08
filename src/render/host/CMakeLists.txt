@@ -22,13 +22,21 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# ── Vulkan ───────────────────────────────────────────────────────────────
+# Ray tracing is required, not optional, so a missing SDK is a hard error
+# rather than a silent fallback to a raster path that was never the point.
+find_package(Vulkan REQUIRED)
+message(STATUS "PESModHost: Vulkan ${Vulkan_VERSION} at ${Vulkan_INCLUDE_DIRS}")
+
 set(HOST_SOURCES
     main.cpp
     scene_receiver.cpp
+    vk_device.cpp
     ../ipc/shared_ring.cpp
 )
 
 add_executable(PESModHost ${HOST_SOURCES})
+target_link_libraries(PESModHost PRIVATE Vulkan::Vulkan)
 
 target_include_directories(PESModHost PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

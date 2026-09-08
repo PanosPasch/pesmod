@@ -13,6 +13,7 @@
 // scene bookkeeping are deliberately proven first, since they are the only
 // parts that depend on the game running.
 #include "scene_receiver.h"
+#include "vk_device.h"
 
 #include <windows.h>
 #include <cstdio>
@@ -43,6 +44,8 @@ namespace
             "                     (default: %s)\n"
             "  --frames <n>       exit after n completed frames (0 = run until Ctrl-C)\n"
             "  --quiet            only print the summary\n"
+            "  --probe            create the Vulkan RT device, report, exit\n"
+            "  --no-validation    disable Vulkan validation layers\n"
             "  --help\n",
             SceneIPC::kDefaultSectionName);
     }
@@ -138,6 +141,8 @@ int main(int argc, char** argv)
     const char* section = SceneIPC::kDefaultSectionName;
     uint64_t    maxFrames = 0;
     bool        quiet = false;
+    bool        probeOnly = false;
+    bool        validation = true;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -145,14 +150,37 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
             maxFrames = strtoull(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--quiet")) quiet = true;
+        else if (!strcmp(argv[i], "--probe")) probeOnly = true;
+        else if (!strcmp(argv[i], "--no-validation")) validation = false;
         else if (!strcmp(argv[i], "--help")) { PrintUsage(); return 0; }
         else { printf("unknown argument: %s\n\n", argv[i]); PrintUsage(); return 2; }
     }
 
     SetConsoleCtrlHandler(ConsoleHandler, TRUE);
 
-    printf("PESMod render host (%d-bit)\n", (int)sizeof(void*) * 8);
-    printf("attaching to '%s'\n", section);
+    printf("PESMod render host (%d-bit)\n\n", (int)sizeof(void*) * 8);
+
+    // The device comes up before the scene stream is touched. If ray tracing
+    // is unavailable there is nothing this process can usefully do, and the
+    // failure should be reported immediately rather than after a long wait
+    // for a producer that was never the problem.
+    Host::VulkanDeviceOptions vkOptions;
+    vkOptions.enableValidation = validation;
+    vkOptions.preferDiscrete   = true;
+    vkOptions.verbose          = !quiet;
+
+    Host::VulkanDevice gpu;
+    if (!gpu.Create(vkOptions))
+    {
+        printf("\nFATAL: %s\n", gpu.LastError().c_str());
+        return 1;
+    }
+    printf("\nVulkan ray tracing device ready:\n");
+    gpu.PrintCapabilities();
+
+    if (probeOnly) return 0;
+
+    printf("\nattaching to '%s'\n", section);
 
     Host::SceneReceiver rx;
 
