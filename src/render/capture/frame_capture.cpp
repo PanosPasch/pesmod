@@ -93,6 +93,41 @@ namespace
         }
     }
 
+    // ── Draw classification ──────────────────────────────────────────────
+    // Three-way, not two. Treating "anything that isn't screen space" as
+    // world space is wrong: a draw whose vertex format we cannot resolve is
+    // unknown, and must not be fed to the ray tracer as if it were geometry.
+    enum DrawSpace { kSpaceScreen, kSpaceWorld, kSpaceUnknown };
+
+    const char* DrawSpaceName(DrawSpace s)
+    {
+        return s == kSpaceScreen ? "screen"
+             : s == kSpaceWorld  ? "world"
+                                 : "unknown";
+    }
+
+    DrawSpace ClassifyDraw(const DeviceState& st,
+                           const Registry::VertexShaderInfo** outDecl)
+    {
+        *outDecl = nullptr;
+        const uint32_t arg = st.vertexShader;
+
+        if (D3D8Util::VertexShaderArgIsFvf(arg))
+        {
+            if (arg == 0)                          return kSpaceUnknown;
+            if (D3D8Util::FvfIsScreenSpace(arg))   return kSpaceScreen;
+            if (D3D8Util::FvfStride(arg) == 0)     return kSpaceUnknown;
+            return kSpaceWorld;
+        }
+
+        // A handle from CreateVertexShader. With a declaration and no shader
+        // function this is fixed-function world-space T&L; a declaration we
+        // never saw created leaves the layout unknown.
+        const Registry::VertexShaderInfo* info = Registry::FindVertexShader(arg);
+        *outDecl = info;
+        return info ? kSpaceWorld : kSpaceUnknown;
+    }
+
     void WriteMatrixJson(FILE* f, const char* name, const D3DMATRIX& m)
     {
         fprintf(f, "\"%s\":[", name);
@@ -373,7 +408,8 @@ namespace
     // ── Per-draw JSON ────────────────────────────────────────────────────
     void WriteDrawJson(const DeviceState& st, const DrawCallInfo& info,
                        uint32_t vbId, uint32_t ibId, const uint32_t texIds[8],
-                       uint32_t triangles, bool screenSpace)
+                       uint32_t triangles, DrawSpace space,
+                       const Registry::VertexShaderInfo* decl)
     {
         if (!g_drawsFile) return;
 
@@ -385,13 +421,38 @@ namespace
                 D3D8Util::PrimitiveTypeName(info.primitiveType));
         fprintf(f, "\"primCount\":%u,", info.primitiveCount);
         fprintf(f, "\"triangles\":%u,", triangles);
-        fprintf(f, "\"space\":\"%s\",", screenSpace ? "screen" : "world");
+        fprintf(f, "\"space\":\"%s\",", DrawSpaceName(space));
 
-        char fvfDesc[128];
+        // The raw SetVertexShader argument, plus which of its two meanings it
+        // carries. Reporting only the FVF loses the distinction between "FVF
+        // zero" and "a declaration handle", which look identical downstream.
+        const uint32_t vsArg = st.vertexShader;
+        const bool isFvf = D3D8Util::VertexShaderArgIsFvf(vsArg);
+        fprintf(f, "\"vs\":\"0x%X\",", vsArg);
+        fprintf(f, "\"vsKind\":\"%s\",",
+                isFvf ? (vsArg ? "fvf" : "none") : "declaration");
+
+        char layoutDesc[256];
+        uint32_t stride = 0;
+        if (isFvf)
+        {
+            stride = D3D8Util::FvfStride(vsArg);
+            D3D8Util::FvfDescribe(vsArg, layoutDesc, sizeof(layoutDesc));
+        }
+        else if (decl)
+        {
+            stride = decl->layout.streamStride[0];
+            D3D8Util::VertexDeclDescribe(decl->layout, layoutDesc,
+                                         sizeof(layoutDesc));
+        }
+        else
+        {
+            _snprintf_s(layoutDesc, sizeof(layoutDesc), _TRUNCATE,
+                        "UNRESOLVED_HANDLE(0x%X)", vsArg);
+        }
         fprintf(f, "\"fvf\":\"0x%X\",", st.Fvf());
-        fprintf(f, "\"fvfDesc\":\"%s\",",
-                D3D8Util::FvfDescribe(st.Fvf(), fvfDesc, sizeof(fvfDesc)));
-        fprintf(f, "\"stride\":%u,", D3D8Util::FvfStride(st.Fvf()));
+        fprintf(f, "\"layout\":\"%s\",", layoutDesc);
+        fprintf(f, "\"stride\":%u,", stride);
 
         fprintf(f, "\"indexed\":%s,", info.indexed ? "true" : "false");
         fprintf(f, "\"userPointer\":%s,", info.userPointer ? "true" : "false");
@@ -728,31 +789,37 @@ void OnDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
     (void)realDevice;
     if (!g_initialised) return;
 
-    const uint32_t fvf = state.Fvf();
-    const bool     fvfKnown    = D3D8Util::FvfStride(fvf) != 0;
-    const bool     screenSpace = state.DrawIsScreenSpace();
+    const Registry::VertexShaderInfo* decl = nullptr;
+    const DrawSpace space = ClassifyDraw(state, &decl);
     const uint32_t tris =
         D3D8Util::PrimitiveTriangleCount(info.primitiveType, info.primitiveCount);
 
     ++g_stats.drawCalls;
     g_stats.triangles += tris;
-    if (!fvfKnown)     ++g_stats.drawCallsUnknownFvf;
-    if (screenSpace) { ++g_stats.drawCalls2D; g_stats.triangles2D += tris; }
-    else             { ++g_stats.drawCalls3D; g_stats.triangles3D += tris; }
+    switch (space)
+    {
+    case kSpaceScreen:  ++g_stats.drawCalls2D; g_stats.triangles2D += tris; break;
+    case kSpaceWorld:   ++g_stats.drawCalls3D; g_stats.triangles3D += tris; break;
+    case kSpaceUnknown: ++g_stats.drawCallsUnknownFvf;                      break;
+    }
 
-    g_frameFvfs.insert(fvf);
-    g_sessionFvfs.insert(fvf);
+    // Vertex formats are tracked by the raw SetVertexShader argument, so an
+    // FVF and a declaration handle stay distinguishable in the summary.
+    g_frameFvfs.insert(state.vertexShader);
+    g_sessionFvfs.insert(state.vertexShader);
 
     // The match scene is the target of this whole exercise, and it is only
     // reachable through several menus — awkward to trigger by frame number or
     // key press. Arming on the first world-space draw catches it automatically.
     // The capture is deferred to the *next* frame because this one is already
     // partway through and its earlier draws are gone.
-    if (!screenSpace && !g_first3DSeen)
+    if (space == kSpaceWorld && !g_first3DSeen)
     {
         g_first3DSeen = true;
         Logger::Log("[Capture] First world-space geometry at frame %u "
-                    "(fvf 0x%X).", g_frameIndex, fvf);
+                    "(vs 0x%X, %s).", g_frameIndex, state.vertexShader,
+                    D3D8Util::VertexShaderArgIsFvf(state.vertexShader)
+                        ? "FVF" : "declaration");
         if (RenderConfig::CaptureOnFirst3D() && !g_capturing)
         {
             Logger::Log("[Capture] Arming capture for the next frame.");
@@ -764,7 +831,7 @@ void OnDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
     // would mean locking every vertex buffer on every draw, which is far too
     // expensive outside a capture; the world-matrix translation is free and
     // still establishes the coordinate-system scale.
-    if (!screenSpace)
+    if (space == kSpaceWorld)
     {
         float origin[3];
         MatrixTranslation(state.world, origin);
@@ -815,7 +882,7 @@ void OnDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
         DumpBufferBytes(path, info.upVertexData, verts * info.upVertexStride);
     }
 
-    WriteDrawJson(state, info, vbId, ibId, texIds, tris, screenSpace);
+    WriteDrawJson(state, info, vbId, ibId, texIds, tris, space, decl);
 }
 
 void OnClear(uint32_t flags, D3DCOLOR color, float z)
@@ -912,17 +979,64 @@ void WriteSessionReport(const char* path)
             g_session.maxDrawsInAFrame);
 
     // ── Vertex formats ───────────────────────────────────────────────────
+    // Both meanings of the SetVertexShader argument appear here: FVF codes
+    // and handles created from a vertex declaration.
     fprintf(f, "\n## Vertex formats seen (%u distinct)\n\n",
             (uint32_t)g_sessionFvfs.size());
-    fprintf(f, "| FVF | Layout | Stride | Space |\n|---|---|---:|---|\n");
+    fprintf(f, "| SetVertexShader arg | Kind | Layout | Stride | Space |\n");
+    fprintf(f, "|---|---|---|---:|---|\n");
     for (std::set<uint32_t>::const_iterator it = g_sessionFvfs.begin();
          it != g_sessionFvfs.end(); ++it)
     {
-        char d[128];
-        const uint32_t stride = D3D8Util::FvfStride(*it);
-        fprintf(f, "| `0x%X` | %s | %u | %s |\n", *it,
-                D3D8Util::FvfDescribe(*it, d, sizeof(d)), stride,
-                D3D8Util::FvfIsScreenSpace(*it) ? "screen (2D)" : "world (3D)");
+        const uint32_t arg = *it;
+        char d[256];
+
+        if (D3D8Util::VertexShaderArgIsFvf(arg))
+        {
+            if (arg == 0)
+            {
+                fprintf(f, "| `0x0` | none | *(no vertex format bound)* | - "
+                           "| unknown |\n");
+                continue;
+            }
+            fprintf(f, "| `0x%X` | FVF | %s | %u | %s |\n", arg,
+                    D3D8Util::FvfDescribe(arg, d, sizeof(d)),
+                    D3D8Util::FvfStride(arg),
+                    D3D8Util::FvfIsScreenSpace(arg) ? "screen (2D)"
+                                                    : "world (3D)");
+        }
+        else
+        {
+            const Registry::VertexShaderInfo* info =
+                Registry::FindVertexShader(arg);
+            if (info)
+                fprintf(f, "| `0x%X` | declaration%s | %s | %u | world (3D) |\n",
+                        arg, info->hasFunction ? " + shader" : "",
+                        D3D8Util::VertexDeclDescribe(info->layout, d, sizeof(d)),
+                        info->layout.streamStride[0]);
+            else
+                fprintf(f, "| `0x%X` | declaration | *(created before hook)* "
+                           "| - | unknown |\n", arg);
+        }
+    }
+
+    // ── Vertex declarations ──────────────────────────────────────────────
+    if (Registry::VertexShaderCount())
+    {
+        fprintf(f, "\n## Vertex declarations (%u)\n\n",
+                Registry::VertexShaderCount());
+        fprintf(f, "| Handle | Has shader function | Elements | Stride |\n");
+        fprintf(f, "|---|---|---|---:|\n");
+        for (uint32_t i = 0; i < Registry::VertexShaderCount(); ++i)
+        {
+            const Registry::VertexShaderInfo* info = Registry::VertexShaderAt(i);
+            if (!info) continue;
+            char d[256];
+            fprintf(f, "| `0x%X` | %s | %s | %u |\n", info->handle,
+                    info->hasFunction ? "yes" : "no (fixed function)",
+                    D3D8Util::VertexDeclDescribe(info->layout, d, sizeof(d)),
+                    info->layout.streamStride[0]);
+        }
     }
 
     // ── Resources ────────────────────────────────────────────────────────

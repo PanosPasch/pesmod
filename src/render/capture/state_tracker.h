@@ -9,10 +9,15 @@
 // set by *earlier* calls. This mirrors that state so each draw can be
 // captured with its full context attached.
 //
-// pes6.exe drives the pipeline entirely through fixed function: no vertex
-// shaders exist in the binary, so world/view/projection matrices set via
-// SetTransform are the real object transforms. That is what makes the
+// pes6.exe drives the pipeline entirely through fixed function — the binary
+// contains no shader bytecode at all — so the world/view/projection matrices
+// set via SetTransform are the real object transforms. That is what makes the
 // scene reconstructible for ray tracing.
+//
+// It does not follow that everything uses an FVF. Menus do, but the 3D scene
+// binds a *vertex declaration* handle from CreateVertexShader(decl, NULL),
+// which describes a layout without being a shader. Both forms arrive through
+// the same `vertexShader` field below.
 #pragma once
 
 #include "../d3d8/d3d8_min.h"
@@ -65,9 +70,11 @@ namespace Capture
         IDirect3DIndexBuffer8*  indexBuffer;
         uint32_t                baseVertexIndex;
 
-        // SetVertexShader is called with an FVF code in this game, never a
-        // shader handle — FVF codes have the low bit clear and handles are
-        // allocated with it set, which is how the two are told apart.
+        // The raw SetVertexShader argument, which D3D8 overloads: either an
+        // FVF code or a handle from CreateVertexShader. FVF codes have bit 0
+        // clear and handles have it set, which is how the two are told apart.
+        // This game uses FVFs for 2D menu draws and declaration handles for
+        // the 3D scene, so both appear here.
         uint32_t vertexShader;
         uint32_t pixelShader;
 
@@ -85,11 +92,11 @@ namespace Capture
         // than a created vertex-shader handle).
         bool VertexShaderIsFvf() const;
 
-        // Convenience accessors used by the capture writer.
+        // The bound FVF, or 0 when a declaration handle is bound instead.
+        // Note that 0 is therefore ambiguous — read `vertexShader` directly to
+        // tell "no format bound" from "a declaration". Classifying a draw as
+        // 2D or 3D needs the declaration registry, so it lives in the capture
+        // layer rather than here.
         uint32_t Fvf() const { return VertexShaderIsFvf() ? vertexShader : 0u; }
-
-        // True when the active vertex format is pre-transformed screen space
-        // (D3DFVF_XYZRHW) — i.e. this draw is 2D overlay, not scene geometry.
-        bool DrawIsScreenSpace() const;
     };
 }

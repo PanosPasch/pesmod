@@ -145,6 +145,192 @@ const char* FvfDescribe(uint32_t fvf, char* buf, size_t bufSize)
     return buf;
 }
 
+// ── Vertex declarations ──────────────────────────────────────────────────
+namespace
+{
+    // Token layout, from the D3DVSD_* macros in the DirectX 8 SDK.
+    const uint32_t kTokenTypeShift = 29;
+    const uint32_t kTokenTypeMask  = 0x7u << kTokenTypeShift;
+    const uint32_t kTokenStream    = 1;
+    const uint32_t kTokenStreamData= 2;
+    const uint32_t kTokenConstMem  = 4;
+
+    const uint32_t kDataTypeShift  = 16;   // D3DVSD_DATATYPESHIFT
+    const uint32_t kSkipCountShift = 16;   // D3DVSD_SKIPCOUNTSHIFT
+    const uint32_t kSkipFlag       = 0x10000000u;
+    const uint32_t kDeclEnd        = 0xFFFFFFFFu;
+
+    uint32_t VsdtSize(uint32_t type)
+    {
+        switch (type)
+        {
+        case kVsdtFloat1:   return 4;
+        case kVsdtFloat2:   return 8;
+        case kVsdtFloat3:   return 12;
+        case kVsdtFloat4:   return 16;
+        case kVsdtD3DColor: return 4;
+        case kVsdtUByte4:   return 4;
+        case kVsdtShort2:   return 4;
+        case kVsdtShort4:   return 8;
+        default:            return 0;
+        }
+    }
+}
+
+bool VertexDeclDecode(const uint32_t* decl, uint32_t maxTokens,
+                      VertexDeclLayout& out)
+{
+    memset(&out, 0, sizeof(out));
+    if (!decl) return false;
+
+    uint32_t stream = 0;
+    uint32_t offset = 0;   // running byte offset within the current stream
+
+    for (uint32_t i = 0; i < maxTokens; ++i)
+    {
+        const uint32_t token = decl[i];
+        ++out.tokenCount;
+
+        if (token == kDeclEnd)
+        {
+            out.valid = true;
+            return true;
+        }
+
+        const uint32_t type = (token & kTokenTypeMask) >> kTokenTypeShift;
+        switch (type)
+        {
+        case kTokenStream:
+            stream = token & 0xFu;
+            if (stream >= D3D8_MAX_STREAMS) return false;
+            // Each stream restarts its own vertex at offset zero.
+            offset = out.streamStride[stream];
+            break;
+
+        case kTokenStreamData:
+        {
+            if (token & kSkipFlag)
+            {
+                // A skip advances the cursor by N DWORDs without binding
+                // anything — padding, or data this declaration ignores.
+                const uint32_t dwords = (token >> kSkipCountShift) & 0xFu;
+                offset += dwords * 4u;
+            }
+            else
+            {
+                const uint32_t dataType = (token >> kDataTypeShift) & 0xFu;
+                const uint32_t reg      = token & 0x1Fu;
+                const uint32_t size     = VsdtSize(dataType);
+                if (size == 0) return false;
+
+                if (out.elementCount < 32)
+                {
+                    VertexDeclElement& e = out.elements[out.elementCount++];
+                    e.stream = stream;
+                    e.reg    = reg;
+                    e.type   = dataType;
+                    e.offset = offset;
+                    e.size   = size;
+                }
+                offset += size;
+            }
+            if (stream < D3D8_MAX_STREAMS) out.streamStride[stream] = offset;
+            break;
+        }
+
+        case kTokenConstMem:
+            // Constant data embedded in the declaration; it carries no
+            // per-vertex layout, so skip its payload DWORDs.
+            i += ((token >> 16) & 0xFu) * 4u;
+            break;
+
+        default:
+            // Tessellator / extension tokens carry no stream layout for our
+            // purposes; ignore them but keep scanning.
+            break;
+        }
+    }
+
+    return false;   // ran off the end without a D3DVSD_END token
+}
+
+const char* VertexDeclTypeName(uint32_t type)
+{
+    switch (type)
+    {
+    case kVsdtFloat1:   return "float1";
+    case kVsdtFloat2:   return "float2";
+    case kVsdtFloat3:   return "float3";
+    case kVsdtFloat4:   return "float4";
+    case kVsdtD3DColor: return "d3dcolor";
+    case kVsdtUByte4:   return "ubyte4";
+    case kVsdtShort2:   return "short2";
+    case kVsdtShort4:   return "short4";
+    default:            return UnknownName("VSDT", type);
+    }
+}
+
+const char* VertexRegisterName(uint32_t reg)
+{
+    // D3DVSDE_* register semantics for the fixed-function pipeline.
+    switch (reg)
+    {
+    case 0:  return "POSITION";
+    case 1:  return "BLENDWEIGHT";
+    case 2:  return "BLENDINDICES";
+    case 3:  return "NORMAL";
+    case 4:  return "PSIZE";
+    case 5:  return "DIFFUSE";
+    case 6:  return "SPECULAR";
+    case 7:  return "TEXCOORD0";
+    case 8:  return "TEXCOORD1";
+    case 9:  return "TEXCOORD2";
+    case 10: return "TEXCOORD3";
+    case 11: return "TEXCOORD4";
+    case 12: return "TEXCOORD5";
+    case 13: return "TEXCOORD6";
+    case 14: return "TEXCOORD7";
+    case 15: return "POSITION2";
+    case 16: return "NORMAL2";
+    default: return UnknownName("REG", reg);
+    }
+}
+
+const char* VertexDeclDescribe(const VertexDeclLayout& layout,
+                               char* buf, size_t bufSize)
+{
+    if (!layout.valid)
+    {
+        _snprintf_s(buf, bufSize, _TRUNCATE, "INVALID_DECL");
+        return buf;
+    }
+
+    size_t used = 0;
+    buf[0] = '\0';
+    uint32_t lastStream = 0xFFFFFFFFu;
+
+    for (uint32_t i = 0; i < layout.elementCount && used < bufSize - 1; ++i)
+    {
+        const VertexDeclElement& e = layout.elements[i];
+        int n = 0;
+        if (e.stream != lastStream)
+        {
+            lastStream = e.stream;
+            n = _snprintf_s(buf + used, bufSize - used, _TRUNCATE,
+                            "%ss%u:", used ? " " : "", e.stream);
+            if (n > 0) used += (size_t)n;
+        }
+        n = _snprintf_s(buf + used, bufSize - used, _TRUNCATE, " %s:%s",
+                        VertexRegisterName(e.reg), VertexDeclTypeName(e.type));
+        if (n > 0) used += (size_t)n;
+    }
+
+    if (used < bufSize - 1)
+        _snprintf_s(buf + used, bufSize - used, _TRUNCATE, " (%uB)",
+                    layout.streamStride[0]);
+    return buf;
+}
+
 // ── Primitive maths ──────────────────────────────────────────────────────
 uint32_t PrimitiveVertexCount(D3DPRIMITIVETYPE type, uint32_t n)
 {

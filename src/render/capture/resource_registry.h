@@ -21,6 +21,7 @@
 #pragma once
 
 #include "../d3d8/d3d8_min.h"
+#include "../d3d8/d3d8_util.h"
 #include <cstdint>
 
 namespace Capture
@@ -86,6 +87,29 @@ namespace Capture
         // Iteration for the report writer.
         uint32_t Count();
         const ResourceInfo* At(uint32_t index);
+
+        // ── Vertex declarations ──────────────────────────────────────────
+        // SetVertexShader takes either an FVF code or a handle from
+        // CreateVertexShader. When the game passes a handle, the vertex
+        // layout lives in the declaration that created it — so the
+        // declaration has to be kept or the layout of every draw using it
+        // is unknowable.
+        void AddVertexShader(uint32_t handle, const uint32_t* declaration,
+                             bool hasFunction);
+        void RemoveVertexShader(uint32_t handle);
+
+        struct VertexShaderInfo
+        {
+            uint32_t                     handle;
+            bool                         hasFunction;  // true = real shader
+            D3D8Util::VertexDeclLayout   layout;
+        };
+
+        // Returns nullptr for an unknown handle — which includes anything
+        // created before the hook was installed.
+        const VertexShaderInfo* FindVertexShader(uint32_t handle);
+        uint32_t VertexShaderCount();
+        const VertexShaderInfo* VertexShaderAt(uint32_t index);
 
         // Aggregate counters for the running per-frame summary.
         struct Totals

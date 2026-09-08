@@ -549,11 +549,37 @@ HRESULT __stdcall ProxyDevice8::GetCurrentTexturePalette(UINT* pn)
 HRESULT __stdcall ProxyDevice8::ProcessVertices(UINT S, UINT D, UINT C, IDirect3DVertexBuffer8* pDest, DWORD Flags)
     { return m_real->ProcessVertices(S, D, C, pDest, Flags); }
 HRESULT __stdcall ProxyDevice8::CreateVertexShader(const DWORD* pDecl, const DWORD* pFunc, DWORD* pHandle, DWORD Usage)
-    { return m_real->CreateVertexShader(pDecl, pFunc, pHandle, Usage); }
+{
+    const HRESULT hr = m_real->CreateVertexShader(pDecl, pFunc, pHandle, Usage);
+
+    // A declaration with pFunction == NULL is not a shader at all — it is a
+    // vertex *declaration* driving the fixed-function pipeline. That is how
+    // this game describes its 3D geometry, so the declaration has to be kept
+    // or the vertex layout of every draw using it is unknowable.
+    if (SUCCEEDED(hr) && pHandle && m_captureEnabled)
+    {
+        Registry::AddVertexShader((uint32_t)*pHandle, (const uint32_t*)pDecl,
+                                  pFunc != nullptr);
+
+        const Registry::VertexShaderInfo* info =
+            Registry::FindVertexShader((uint32_t)*pHandle);
+        char desc[256];
+        Logger::Log("[Render] CreateVertexShader handle=0x%X %s: %s",
+                    (unsigned)*pHandle,
+                    pFunc ? "(with function)" : "(declaration only)",
+                    info ? D3D8Util::VertexDeclDescribe(info->layout, desc,
+                                                        sizeof(desc))
+                         : "<undecodable>");
+    }
+    return hr;
+}
 HRESULT __stdcall ProxyDevice8::GetVertexShader(DWORD* pHandle)
     { return m_real->GetVertexShader(pHandle); }
 HRESULT __stdcall ProxyDevice8::DeleteVertexShader(DWORD Handle)
-    { return m_real->DeleteVertexShader(Handle); }
+{
+    if (m_captureEnabled) Registry::RemoveVertexShader((uint32_t)Handle);
+    return m_real->DeleteVertexShader(Handle);
+}
 HRESULT __stdcall ProxyDevice8::SetVertexShaderConstant(DWORD R, const void* pData, DWORD C)
     { return m_real->SetVertexShaderConstant(R, pData, C); }
 HRESULT __stdcall ProxyDevice8::GetVertexShaderConstant(DWORD R, void* pData, DWORD C)

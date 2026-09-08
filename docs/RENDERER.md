@@ -55,16 +55,33 @@ The 32-bit side never touches Vulkan. It observes, extracts and forwards.
 
 ### 2.1 It is pure fixed-function
 
-`pes6.exe` imports exactly one graphics entry point: `Direct3DCreate8`. There
-are **no vertex shaders in the binary at all** — `SetVertexShader` is only ever
-called with FVF codes, never with handles from `CreateVertexShader`.
+`pes6.exe` imports exactly one graphics entry point: `Direct3DCreate8`, and the
+binary contains **no vertex shader bytecode at all**. All transformation and
+lighting is fixed-function, so the object and camera transforms are plain
+`SetTransform` matrices rather than being buried in shader constants. The scene
+is therefore *reconstructible* — the property that makes fixed-function DX8/DX9
+titles the class of game RTX Remix targets.
 
-That is the single most important fact for this project. It means every draw's
-vertex layout is fully described by its FVF, and the object and camera
-transforms are plain `SetTransform` matrices rather than being buried inside
-shader constants. The scene is therefore *reconstructible* — which is exactly
-the property that makes fixed-function DX8/DX9 titles the class of game
-RTX Remix targets.
+**But "no shaders" does not mean "everything uses an FVF."** `SetVertexShader`
+is overloaded in D3D8: it accepts either an FVF code or a handle from
+`CreateVertexShader`. Crucially, `CreateVertexShader(declaration, NULL, ...)`
+— with a *null function pointer* — creates a pure **vertex declaration** that
+drives the fixed-function pipeline. No shader is involved, which is why the
+binary can contain zero shader version tokens and still never use an FVF for
+its main geometry.
+
+Measured from a real match frame, the game uses both forms:
+
+| Path | Vertex format | Draw call |
+| ---- | ------------- | --------- |
+| 2D menus / HUD | FVF `0x104`, `0x144` | `DrawPrimitiveUP` |
+| 3D scene | **vertex declaration handle** | `DrawIndexedPrimitive` |
+
+This mattered: an early version of the capture recorded only the decoded FVF,
+so every 3D draw came back as `fvf 0x0` — indistinguishable from "no vertex
+format bound". The capture now records the raw `SetVertexShader` argument, its
+kind (`fvf` / `declaration` / `none`), and decodes declaration token streams
+into a concrete element layout.
 
 ### 2.2 The device layer
 
@@ -175,14 +192,21 @@ exist.
 
 ### 3.3 The 2D / 3D split
 
-The load-bearing classification is `D3DFVF_XYZRHW`. A draw using it is
-pre-transformed screen space — HUD, menus, the fade quad — and stays on the
-game's own path. Everything else is world-space geometry with real
-world/view/projection matrices, and is what the ray tracer takes ownership of.
+Every draw is classified **screen / world / unknown** — three ways, not two:
 
-This is a single bit test on the FVF, and it is exact: there is no heuristic
-involved, because a fixed-function pipeline cannot draw world geometry any
-other way.
+| Bound vertex format | Classification |
+| ------------------- | -------------- |
+| FVF with `D3DFVF_XYZRHW` | **screen** — pre-transformed HUD, menus, fade quads |
+| FVF with `D3DFVF_XYZ` etc. | **world** |
+| Declaration handle, declaration known | **world** |
+| `0` (nothing bound), or a handle created before the hook | **unknown** |
+
+The third bucket matters. An earlier two-way split treated "anything that is
+not screen space" as world geometry, which meant a draw whose vertex format
+could not be resolved was silently handed to the scene as if it were real
+geometry — and it was that bug which first fired the `capture_on_first_3d`
+trigger on a menu frame. Geometry the ray tracer cannot interpret must be
+reported as unknown, not guessed at.
 
 ### 3.4 Output
 
@@ -219,66 +243,130 @@ the game acquires DirectInput exclusively — neither a hotkey nor synthetic
 input is reliable, but "capture the moment 3D geometry first appears" is.
 
 ---
-
 ## 4. Measured behaviour
 
-From a menu/title-screen session (121 frames). **These numbers describe 2D
-menu rendering only** — see the status note in §5.
+### 4.1 A match frame
 
-| Metric | Per frame |
-| ------ | --------: |
-| Draw calls | 3.3 (range 2–22) |
-| `SetRenderState` | 65.1 |
-| — of which redundant | **50.1 (77%)** |
-| `SetTextureStageState` | 98.5 |
-| `SetTexture` | 8.2 |
-| `SetTransform` | 3.1 |
+Captured in-game via `capture_on_first_3d`. This is the workload the ray
+tracer has to replace:
 
-Two vertex formats appear in menus, both screen-space:
+| Metric | Value |
+| ------ | ----: |
+| Draw calls | 460 |
+| — world space | **438** |
+| — screen space (HUD) | 22 |
+| Triangles | 22,801 |
+| — world space | **22,757** |
+| Distinct WORLD matrices | **17** |
+| Distinct VIEW / PROJECTION matrices | **1 / 1** |
+| Vertex buffers referenced | 17 (all read back) |
+| Index buffers referenced | 16 (all read back) |
+| Textures referenced | 44 |
+| `SetRenderState` | 519 (369 redundant, 71%) |
 
-| FVF | Layout | Stride |
-| --- | ------ | -----: |
-| `0x104` | `XYZRHW\|TEX0(2f)` | 24 B |
-| `0x144` | `XYZRHW\|DIFFUSE\|TEX0(2f)` | 28 B |
+A single camera and 17 object transforms per frame means the TLAS is small and
+cheap: 17 instances over ~23k triangles. That is a trivial scene by modern
+standards — the entire per-frame geometry budget is smaller than one character
+in a contemporary game.
 
-Resource totals at that point: 6 vertex buffers (528 KB), 5 index buffers
-(32 KB), 90 textures (128 MB at level 0, dominated by one 3840×2160
-`D3DPOOL_DEFAULT` surface).
+### 4.2 The 3D vertex layout
 
-The redundant-state figure is the notable one: roughly three quarters of all
+The declaration-bound geometry is **24 bytes per vertex**, confirmed by
+decoding the raw buffer bytes rather than trusting the declaration alone:
+
+| Offset | Field | Evidence |
+| -----: | ----- | -------- |
+| 0 | `float3` position | ranges ±5542, ±2457, ±6400 — stadium scale, consistent with the view translation (66, 730, 3003) |
+| 12 | `D3DCOLOR` diffuse | `FFFFFFFF`, `FFF2EBBC` — plausible ARGB, alpha always `FF` |
+| 16 | `float2` texcoord | 0.0–1.0, exceeding 1.0 only where textures tile |
+
+Reading offset 12 as the start of a `float3` normal instead yields `NaN`
+(`0xFFFFFFFF` is not a finite float), which rules that layout out decisively.
+The same 24-byte layout also appears as FVF `0x142` (`XYZ|DIFFUSE|TEX1`) on 16
+`DrawPrimitive` calls, independently confirming it.
+
+Index buffers are 16-bit (`D3DFMT_INDEX16`).
+
+### 4.3 The material model
+
+Uniform across all 438 world-space draws:
+
+| State | Value | Consequence |
+| ----- | ----- | ----------- |
+| `D3DRS_LIGHTING` | **0** | fixed-function lighting is *off*; nothing is lit at draw time |
+| `D3DRS_SPECULARENABLE` | 0 | no specular term |
+| `D3DRS_COLORVERTEX` | 1 | vertex colour is the colour source |
+| Stage 0 `COLOROP` | `MODULATE` | |
+| Stage 1 `COLOROP` | `DISABLE` | a single texture stage |
+
+So the game's entire shading model is:
+
+```
+pixel = texture(uv) x vertexColour
+```
+
+**There are no normals anywhere in the pipeline** — not in the vertex format,
+and no lights are ever set. All illumination is pre-baked into the vertex
+colours (the warm `FFF2EBBC` tint is baked stadium lighting).
+
+This is the central problem for the ray tracer, and it is exactly what RTX
+Remix has to solve too:
+
+- **Normals must be reconstructed** from triangle winding, then smoothed
+  across shared vertices to avoid a faceted look.
+- **Albedo must be recovered** from `texture x bakedLight`. Using the vertex
+  colour as-is would double-light the scene once real lighting is added.
+
+Other per-draw variation: `CULLMODE` is CW on 327 draws and NONE on 111, alpha
+blending is on for 388, alpha test for 420, and fog for 436 of 438.
+
+### 4.4 Menu rendering, for contrast
+
+From a title/menu session (121 frames): 3.3 draws per frame, 65
+`SetRenderState` calls of which 50 redundant, and two screen-space FVFs —
+`0x104` (`XYZRHW|TEX0`, 24 B) and `0x144` (`XYZRHW|DIFFUSE|TEX0`, 28 B).
+
+The redundant-state figure holds across both workloads at roughly 71–77%: most
 `SetRenderState` calls set a value the device already had. A modern backend
-that dedupes state gets that for free.
+that dedupes state gets that back for free.
 
 ---
 
 ## 5. Status
 
-**Validated end to end:** proxy attach, `CreateDevice` substitution, device
-`Reset` handling, state shadowing, per-frame statistics, the hotkey and
-frame-index and first-3D triggers, texture dumping to DDS, user-pointer draw
-capture, session reporting, and honest reporting of resources that could not
-be read back.
+**Validated end to end, in-game:** proxy attach and `CreateDevice`
+substitution; device `Reset` handling; state shadowing; per-frame statistics;
+all three capture triggers (hotkey, frame index, first-3D); vertex, index and
+user-pointer buffer dumping; texture dumping to DDS; session reporting; and
+honest reporting of resources that could not be read back.
 
-**Implemented but not yet exercised:** the vertex- and index-buffer dump path,
-and every world-space code path. The runs so far only reached the title and
-menu screens, which draw exclusively `XYZRHW` geometry with `DrawPrimitiveUP`,
-so no `DrawIndexedPrimitive` from a real vertex buffer has been captured yet.
-Getting there needs a match to be started; `capture_on_first_3d = 1` will then
-dump it automatically.
+**Known limitations:**
+
+- `D3DPOOL_DEFAULT` textures cannot be locked, and are reported as
+  `"dumped": false` with a reason rather than dumped. In the match frame this
+  affected one 3840x2160 surface.
+- Vertex declarations created before the hook is installed cannot be resolved;
+  draws using them classify as `unknown`.
+- `ApplyStateBlock` would desynchronise the shadow. The game does not use state
+  blocks, and the proxy logs a one-time warning if that ever changes.
 
 ---
 
 ## 6. Roadmap
 
-1. **Capture a match frame.** Everything below is written against real data
-   from a real 3D frame rather than assumptions.
-2. **Scene reconstruction.** Group draws into stable objects, derive world
-   transforms, resolve textures to materials, and work out how the game's
-   coordinate system maps to metres so lighting units mean something.
-3. **The 64-bit render host.** Vulkan 1.3 with `VK_KHR_ray_tracing_pipeline`,
-   BLAS per mesh, TLAS per frame, shared-memory scene transport from the ASI.
-4. **Path tracing + denoise.** With DLSS Ray Reconstruction available in the
-   game folder already, that is the natural denoiser target.
+1. **Scene reconstruction.** Group the 17 per-frame transforms into stable
+   objects across frames, reconstruct normals, and de-light the vertex colours
+   into albedo. Establish the world-unit scale (positions suggest roughly
+   1 unit ~ 1 cm, given a pitch on the order of 10,500 x 6,800 units) so that
+   lighting can be physical.
+2. **The 64-bit render host.** Vulkan 1.3 with `VK_KHR_ray_tracing_pipeline`,
+   BLAS per mesh, a 17-instance TLAS per frame, shared-memory scene transport
+   from the ASI.
+3. **Lighting.** Nothing can be inherited from the game — there are no lights
+   in the pipeline at all — so stadium lighting has to be authored: floodlight
+   rigs plus a sky/environment term.
+4. **Path tracing + denoise.** DLSS Ray Reconstruction is already present in
+   the game folder, making it the natural denoiser target.
 5. **Presentation and input.** The host owns the visible window; the game
-   window becomes the input sink. 2D overlay draws are composited on top,
+   window becomes the input sink. The 22 HUD draws are composited on top
    unchanged, per the scope decision to leave the UI alone.

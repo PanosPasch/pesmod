@@ -52,6 +52,59 @@ namespace D3D8Util
     // what the RT renderer takes ownership of.
     bool FvfIsScreenSpace(uint32_t fvf);
 
+    // ── Vertex declarations ──────────────────────────────────────────────
+    // D3D8 overloads SetVertexShader: it takes either an FVF code or a handle
+    // from CreateVertexShader. Crucially, CreateVertexShader accepts a
+    // declaration with pFunction == NULL, which creates a pure *vertex
+    // declaration* driving the fixed-function pipeline — no shader bytecode
+    // involved. That is why a binary can contain zero shader version tokens
+    // and still never use an FVF for its main geometry.
+    //
+    // The declaration is a DWORD token stream terminated by 0xFFFFFFFF.
+
+    enum VertexDeclType   // D3DVSDT_*
+    {
+        kVsdtFloat1 = 0, kVsdtFloat2 = 1, kVsdtFloat3 = 2, kVsdtFloat4 = 3,
+        kVsdtD3DColor = 4, kVsdtUByte4 = 5, kVsdtShort2 = 6, kVsdtShort4 = 7
+    };
+
+    struct VertexDeclElement
+    {
+        uint32_t stream;
+        uint32_t reg;        // vertex register (D3DVSDE_POSITION == 0, etc.)
+        uint32_t type;       // VertexDeclType
+        uint32_t offset;     // byte offset within the stream's vertex
+        uint32_t size;       // byte size of this element
+    };
+
+    struct VertexDeclLayout
+    {
+        VertexDeclElement elements[32];
+        uint32_t          elementCount;
+        uint32_t          streamStride[D3D8_MAX_STREAMS];
+        uint32_t          tokenCount;
+        bool              valid;
+    };
+
+    // Decodes a declaration token stream. `maxTokens` bounds the scan so a
+    // malformed or non-terminated stream cannot run away.
+    bool VertexDeclDecode(const uint32_t* decl, uint32_t maxTokens,
+                          VertexDeclLayout& out);
+
+    // A one-line summary, e.g. "s0: POSITION:float3 DIFFUSE:d3dcolor TEX0:float2 (24B)".
+    const char* VertexDeclDescribe(const VertexDeclLayout& layout,
+                                   char* buf, size_t bufSize);
+
+    const char* VertexDeclTypeName(uint32_t type);
+    const char* VertexRegisterName(uint32_t reg);
+
+    // True when a SetVertexShader argument is an FVF code rather than a
+    // handle. FVF codes always have bit 0 (D3DFVF_RESERVED0) clear.
+    inline bool VertexShaderArgIsFvf(uint32_t arg)
+    {
+        return (arg & D3DFVF_RESERVED0) == 0;
+    }
+
     // ── Primitive maths ──────────────────────────────────────────────────
     // Number of vertices consumed / indices read for a given primitive count.
     uint32_t PrimitiveVertexCount(D3DPRIMITIVETYPE type, uint32_t primitiveCount);

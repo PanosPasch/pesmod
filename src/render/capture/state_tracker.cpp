@@ -169,9 +169,4 @@ bool DeviceState::VertexShaderIsFvf() const
     return (vertexShader & D3DFVF_RESERVED0) == 0;
 }
 
-bool DeviceState::DrawIsScreenSpace() const
-{
-    return VertexShaderIsFvf() && D3D8Util::FvfIsScreenSpace(vertexShader);
-}
-
 } // namespace Capture

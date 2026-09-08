@@ -4,12 +4,19 @@
 
 #include <vector>
 #include <unordered_map>
+#include <map>
+#include <iterator>
+#include <cstring>
 
 namespace
 {
     std::vector<Capture::ResourceInfo>            g_resources;
     std::unordered_map<const void*, uint32_t>     g_byPointer;   // object → index
     uint32_t                                      g_nextId = 1;
+
+    // Keyed by SetVertexShader handle. Ordered so the report lists them
+    // deterministically.
+    std::map<uint32_t, Capture::Registry::VertexShaderInfo> g_vertexShaders;
 
     Capture::ResourceInfo& Append(Capture::ResourceKind kind, void* object)
     {
@@ -43,6 +50,7 @@ void Reset()
 {
     g_resources.clear();
     g_byPointer.clear();
+    g_vertexShaders.clear();
     g_nextId = 1;
 }
 
@@ -128,6 +136,49 @@ uint32_t Count()
 const ResourceInfo* At(uint32_t index)
 {
     return (index < g_resources.size()) ? &g_resources[index] : nullptr;
+}
+
+// ── Vertex declarations ──────────────────────────────────────────────────
+void AddVertexShader(uint32_t handle, const uint32_t* declaration,
+                     bool hasFunction)
+{
+    VertexShaderInfo info;
+    memset(&info, 0, sizeof(info));
+    info.handle      = handle;
+    info.hasFunction = hasFunction;
+
+    // 512 tokens is far beyond any real fixed-function declaration and keeps
+    // a malformed or non-terminated stream from running off into free memory.
+    if (declaration)
+        D3D8Util::VertexDeclDecode(declaration, 512, info.layout);
+
+    g_vertexShaders[handle] = info;
+}
+
+void RemoveVertexShader(uint32_t handle)
+{
+    g_vertexShaders.erase(handle);
+}
+
+const VertexShaderInfo* FindVertexShader(uint32_t handle)
+{
+    std::map<uint32_t, VertexShaderInfo>::const_iterator it =
+        g_vertexShaders.find(handle);
+    return (it == g_vertexShaders.end()) ? nullptr : &it->second;
+}
+
+uint32_t VertexShaderCount()
+{
+    return (uint32_t)g_vertexShaders.size();
+}
+
+const VertexShaderInfo* VertexShaderAt(uint32_t index)
+{
+    if (index >= g_vertexShaders.size()) return nullptr;
+    std::map<uint32_t, VertexShaderInfo>::const_iterator it =
+        g_vertexShaders.begin();
+    std::advance(it, index);
+    return &it->second;
 }
 
 Totals GetTotals()
