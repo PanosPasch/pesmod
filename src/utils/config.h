@@ -15,7 +15,9 @@ namespace Config
     float GetFloat(const char* section, const char* key,
                    float defaultVal = 0.0f);
  
-    // Get an integer value.
+    // Get an integer value. Accepts decimal ("120") and hex ("0x78"); a
+    // leading zero is *not* treated as octal, so "0120" is one hundred and
+    // twenty. Returns defaultVal when the key is missing or non-numeric.
     int GetInt(const char* section, const char* key,
                int defaultVal = 0);
  

@@ -36,6 +36,20 @@ set(SOURCES
     src/patching/patcher.cpp
     src/utils/logger.cpp
     src/utils/config.cpp
+
+    # ── Renderer subsystem ───────────────────────────────────────────────
+    # D3D8 interception layer: understands what the game's renderer does, and
+    # is the foundation the Vulkan ray-traced backend is built on. Compiled in
+    # unconditionally but inert unless [render] enabled=1 in PESMod.ini.
+    src/render/render_config.cpp
+    src/render/render_hooks.cpp
+    src/render/d3d8/d3d8_guids.cpp
+    src/render/d3d8/d3d8_util.cpp
+    src/render/capture/state_tracker.cpp
+    src/render/capture/resource_registry.cpp
+    src/render/capture/frame_capture.cpp
+    src/render/capture/proxy_d3d8.cpp
+    src/render/capture/proxy_device.cpp
 )
  
 # ── Build as shared library ───────────────────────────────────────────────
@@ -52,6 +66,7 @@ target_link_libraries(PESMod PRIVATE
     ${CMAKE_SOURCE_DIR}/include/MinHook/lib/MinHook.x86.lib
     windowscodecs   # WIC (IWICImagingFactory) — custom logo PNG decode
     ole32           # CoCreateInstance / CoInitializeEx
+    uuid            # IID_IUnknown, referenced by the D3D8 proxy QueryInterface
 )
  
 # ── Output as .asi (not .dll) ────────────────────────────────────────────

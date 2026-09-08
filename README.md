@@ -158,13 +158,33 @@ PESMod/
 │  ├─ dllmain.cpp        ASI entry point
 │  ├─ mod_core.*         Startup / shutdown
 │  ├─ hooks/             Game function hooks (kits, squads, leagues, UI)
+│  ├─ render/            D3D8 interception + Vulkan ray-traced renderer
 │  ├─ patching/          Memory patch + pattern-scan helpers
 │  └─ utils/             Logger and INI config reader
 ├─ include/MinHook/      Vendored MinHook (BSD-2-Clause)
 ├─ samples/              Example INI configuration files
-├─ docs/                 Internals overview, config reference, 010 template
+├─ docs/                 Internals, renderer, config reference, 010 template
 └─ tools/ui-bin-viewer/  Web tool for inspecting the game's UI .bin layouts
 ```
+
+---
+
+## Renderer
+
+`src/render/` holds a Direct3D 8 interception layer: PESMod wraps `IDirect3D8`
+and `IDirect3DDevice8` so it can observe, record and ultimately replace the
+game's rendering. It is the foundation for a Vulkan ray-traced renderer.
+
+It is **off by default** — without `[render] enabled = 1` in `PESMod.ini` the
+game's Direct3D path is left completely untouched. With it on, PESMod can
+record per-frame statistics and dump a complete frame (geometry, textures, and
+every draw call's pipeline state) for analysis.
+
+Because the game is a 32-bit process and NVIDIA's 32-bit Vulkan ICD does not
+expose the ray tracing extensions, hardware ray tracing cannot run in-process;
+the renderer is therefore split between the in-game ASI and a separate 64-bit
+render host. See [`docs/RENDERER.md`](docs/RENDERER.md) for the measurements
+behind that, the reverse-engineered engine internals, and the architecture.
 
 ---
 

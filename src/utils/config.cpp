@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
  
 static char g_iniPath[MAX_PATH] = {};
  
@@ -33,8 +34,25 @@ int Config::GetInt(const char* section, const char* key, int defaultVal)
 {
     std::string val = GetString(section, key, "");
     if (val.empty()) return defaultVal;
-    try { return std::stoi(val); }
-    catch (...) { return defaultVal; }
+
+    // Accept both decimal and 0x-prefixed hex. std::stoi defaults to base 10,
+    // which parses "0x78" as 0 and stops at the 'x' — silently wrong rather
+    // than throwing, so a hex value would quietly become zero.
+    //
+    // Base is chosen explicitly rather than passing 0 to strtol, because
+    // base 0 would also treat a leading zero as octal and turn a value like
+    // "0120" into 80.
+    // strtol consumes the "0x" prefix itself once base 16 is selected.
+    const size_t digitStart = (val[0] == '-' || val[0] == '+') ? 1u : 0u;
+    const bool isHex = val.size() > digitStart + 1 &&
+                       val[digitStart] == '0' &&
+                       (val[digitStart + 1] == 'x' || val[digitStart + 1] == 'X');
+    const int base = isHex ? 16 : 10;
+
+    char* end = nullptr;
+    const long parsed = strtol(val.c_str(), &end, base);
+    if (end == val.c_str()) return defaultVal;   // nothing numeric at all
+    return (int)parsed;
 }
  
 bool Config::GetBool(const char* section, const char* key, bool defaultVal)
