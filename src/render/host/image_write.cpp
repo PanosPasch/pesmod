@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace Host
@@ -23,6 +24,25 @@ namespace
     template <typename T> void SafeRelease(T*& p)
     {
         if (p) { p->Release(); p = nullptr; }
+    }
+
+    // Creates the directories leading to `path` if they are missing. Without
+    // this, --save-path pointing somewhere sensible but not yet existing
+    // fails per frame with nothing to suggest the folder is the problem.
+    void EnsureParentDirectory(const char* path)
+    {
+        std::string dir(path);
+        const size_t slash = dir.find_last_of("\\/");
+        if (slash == std::string::npos) return;      // bare filename, cwd
+        dir.resize(slash);
+
+        // Walk forwards so each level exists before the next is attempted.
+        // Existing levels and drive roots both fail harmlessly.
+        for (size_t i = 1; i <= dir.size(); ++i)
+        {
+            if (i != dir.size() && dir[i] != '\\' && dir[i] != '/') continue;
+            CreateDirectoryA(dir.substr(0, i).c_str(), nullptr);
+        }
     }
 }
 
@@ -127,6 +147,7 @@ bool WriteImagePng(const char* path, const uint8_t* rgba,
 bool WriteImage(const char* path, const uint8_t* rgba,
                 uint32_t width, uint32_t height)
 {
+    EnsureParentDirectory(path);
     return EndsWithNoCase(path, ".ppm")
                ? WriteImagePpm(path, rgba, width, height)
                : WriteImagePng(path, rgba, width, height);
