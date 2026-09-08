@@ -14,11 +14,14 @@
 // parts that depend on the game running.
 #include "scene_receiver.h"
 #include "vk_device.h"
+#include "vk_alloc.h"
+#include "vk_accel.h"
 
 #include <windows.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <vector>
 
 namespace
 {
@@ -99,6 +102,170 @@ namespace
                    "%u never sent)\n", missing, evicted, neverSent);
     }
 
+    // Builds a synthetic scene, pushes it through the real transport, and
+    // runs the acceleration structure builder over it.
+    //
+    // Going through SharedRing rather than poking the receiver's internals
+    // means this covers the protocol, the receiver and the builder together,
+    // and it needs no running game — which matters because the game side can
+    // only be exercised by actually playing a match.
+    int RunAccelSelfTest(Host::VulkanDevice& gpu)
+    {
+        const char* kSection = "Local\\PESMod.SceneStream.ASTest";
+        printf("\n-------- acceleration structure self-test --------\n");
+
+        SceneIPC::SharedRing producer;
+        if (!producer.CreateAsProducer(kSection, 4ull * 1024ull * 1024ull))
+        {
+            printf("FAIL: could not create the test section\n");
+            return 1;
+        }
+
+        // A 4-triangle mesh: large enough to earn its own BLAS.
+        {
+            struct LitVertex { float px, py, pz, nx, ny, nz, u, v; };
+            LitVertex verts[6] = {
+                {  0,  0,  0,  0,1,0, 0,0 }, {  1,  0,  0,  0,1,0, 1,0 },
+                {  1,  1,  0,  0,1,0, 1,1 }, {  0,  1,  0,  0,1,0, 0,1 },
+                {  0,  0,  1,  0,1,0, 0,0 }, {  1,  0,  1,  0,1,0, 1,0 },
+            };
+            uint16_t idx[12] = { 0,1,2,  0,2,3,  0,1,4,  1,5,4 };
+
+            SceneIPC::GeometryDesc gd{};
+            gd.geometryId   = 0x1111111100000001ull;
+            gd.vertexKind   = SceneIPC::kVertexLit;
+            gd.vertexStride = sizeof(LitVertex);
+            gd.vertexCount  = 6;
+            gd.indexCount   = 12;
+            gd.indexStride  = 2;
+            gd.contentHash  = 0xABCD1234u;
+
+            std::vector<uint8_t> payload(sizeof(verts) + sizeof(idx));
+            memcpy(payload.data(), verts, sizeof(verts));
+            memcpy(payload.data() + sizeof(verts), idx, sizeof(idx));
+            producer.TryWrite(SceneIPC::kMsgGeometry, &gd, sizeof(gd),
+                              payload.data(), (uint32_t)payload.size(), false);
+        }
+
+        // A 2-triangle quad: exactly the sprite case that must be merged
+        // rather than given a structure of its own.
+        {
+            struct LitVertex { float px, py, pz, nx, ny, nz, u, v; };
+            LitVertex verts[4] = {
+                { 0,0,0, 0,1,0, 0,0 }, { 2,0,0, 0,1,0, 1,0 },
+                { 2,2,0, 0,1,0, 1,1 }, { 0,2,0, 0,1,0, 0,1 },
+            };
+            uint16_t idx[6] = { 0,1,2, 0,2,3 };
+
+            SceneIPC::GeometryDesc gd{};
+            gd.geometryId   = 0x2222222200000002ull;
+            gd.vertexKind   = SceneIPC::kVertexLit;
+            gd.vertexStride = sizeof(LitVertex);
+            gd.vertexCount  = 4;
+            gd.indexCount   = 6;
+            gd.indexStride  = 2;
+            gd.contentHash  = 0x55AA55AAu;
+
+            std::vector<uint8_t> payload(sizeof(verts) + sizeof(idx));
+            memcpy(payload.data(), verts, sizeof(verts));
+            memcpy(payload.data() + sizeof(verts), idx, sizeof(idx));
+            producer.TryWrite(SceneIPC::kMsgGeometry, &gd, sizeof(gd),
+                              payload.data(), (uint32_t)payload.size(), false);
+        }
+
+        // Identity view and projection, so the recovered world transform is
+        // the clip transform itself and the affinity check must pass.
+        SceneIPC::FrameBegin fb{};
+        fb.frameIndex   = 1;
+        fb.renderWidth  = 1920;
+        fb.renderHeight = 1080;
+        fb.view         = Host::Math::Identity();
+        fb.projection   = Host::Math::Identity();
+        fb.instanceCount = 3;
+        producer.TryWrite(SceneIPC::kMsgFrameBegin, &fb, sizeof(fb), nullptr, 0, true);
+
+        // One mesh instance, and two sprites that must collapse into one.
+        const uint64_t ids[3] = { 0x1111111100000001ull,
+                                  0x2222222200000002ull,
+                                  0x2222222200000002ull };
+        for (int i = 0; i < 3; ++i)
+        {
+            SceneIPC::InstanceDesc inst{};
+            inst.geometryId    = ids[i];
+            inst.clipTransform = Host::Math::Identity();
+            inst.clipTransform.m[12] = (float)i * 3.0f;   // offset each one
+            inst.baseColorFactor[0] = inst.baseColorFactor[1] =
+            inst.baseColorFactor[2] = inst.baseColorFactor[3] = 1.0f;
+            producer.TryWrite(SceneIPC::kMsgInstance, &inst, sizeof(inst),
+                              nullptr, 0, true);
+        }
+
+        SceneIPC::FrameEnd fe{};
+        fe.frameIndex    = 1;
+        fe.instanceCount = 3;
+        producer.TryWrite(SceneIPC::kMsgFrameEnd, &fe, sizeof(fe), nullptr, 0, true);
+
+        Host::SceneReceiver rx;
+        if (!rx.Attach(kSection)) { printf("FAIL: consumer could not attach\n"); return 1; }
+        rx.Poll();
+
+        const Host::Frame& f = rx.CurrentFrame();
+        printf("  scene decoded: %zu instances, %zu geometries\n",
+               f.instances.size(), rx.GeometryCount());
+
+        Host::GpuAllocator alloc;
+        Host::AccelBuilder accel;
+        if (!alloc.Init(&gpu) || !accel.Init(&gpu, &alloc))
+        {
+            printf("FAIL: %s\n", accel.LastError().c_str());
+            return 1;
+        }
+
+        if (!accel.BuildFrame(rx))
+        {
+            printf("FAIL: BuildFrame - %s\n", accel.LastError().c_str());
+            return 1;
+        }
+
+        const Host::AccelStats& st = accel.Stats();
+        int failures = 0;
+        auto check = [&](bool ok, const char* what) {
+            printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
+            if (!ok) ++failures;
+        };
+
+        check(f.instances.size() == 3,      "3 instances decoded");
+        check(rx.GeometryCount() == 2,      "2 geometries resident");
+        check(st.geometryUnresolved == 0,   "all instances resolved their geometry");
+        check(st.transformsRejected == 0,   "all world transforms affine");
+        check(st.persistentBlas == 1,       "only the 4-triangle mesh got its own BLAS");
+        check(st.spriteInstances == 2,      "both quads folded into the sprite batch");
+        check(st.spriteTriangles == 4,      "sprite batch holds 4 triangles");
+        check(st.tlasInstances == 2,        "TLAS = 1 mesh + 1 merged sprite instance");
+        check(accel.Tlas() != VK_NULL_HANDLE, "TLAS handle created");
+
+        printf("  build took %.2f ms, BLAS storage %.1f KB\n",
+               st.buildMilliseconds, st.blasBytes / 1024.0);
+        printf("  allocator: %u blocks, %u live buffers, %.1f MB in use\n",
+               alloc.BlockCount(), alloc.LiveAllocations(),
+               alloc.BytesInUse() / (1024.0 * 1024.0));
+
+        accel.Shutdown();
+        alloc.Shutdown();
+        printf("%s\n", failures == 0 ? "ALL CHECKS PASSED" : "FAILURES PRESENT");
+        return failures == 0 ? 0 : 1;
+    }
+
+    void ReportAccel(const Host::AccelStats& st)
+    {
+        printf("    AS: %u BLAS (%u rebuilt) | %u sprites -> %u tris merged | "
+               "TLAS %u inst | rejected %u | %.2f ms\n",
+               st.persistentBlas, st.blasBuiltThisFrame,
+               st.spriteInstances, st.spriteTriangles,
+               st.tlasInstances, st.transformsRejected,
+               st.buildMilliseconds);
+    }
+
     void ReportSummary(const Host::SceneReceiver& rx)
     {
         const Host::ReceiverStats& s = rx.Stats();
@@ -155,6 +322,7 @@ int main(int argc, char** argv)
     uint64_t    retention = 900;
     bool        quiet = false;
     bool        probeOnly = false;
+    bool        asTest = false;
     bool        validation = true;
 
     for (int i = 1; i < argc; ++i)
@@ -166,6 +334,7 @@ int main(int argc, char** argv)
             retention = strtoull(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--quiet")) quiet = true;
         else if (!strcmp(argv[i], "--probe")) probeOnly = true;
+        else if (!strcmp(argv[i], "--astest")) asTest = true;
         else if (!strcmp(argv[i], "--no-validation")) validation = false;
         else if (!strcmp(argv[i], "--help")) { PrintUsage(); return 0; }
         else { printf("unknown argument: %s\n\n", argv[i]); PrintUsage(); return 2; }
@@ -194,8 +363,20 @@ int main(int argc, char** argv)
     gpu.PrintCapabilities();
 
     if (probeOnly) return 0;
+    if (asTest)    return RunAccelSelfTest(gpu);
 
     printf("\nattaching to '%s'\n", section);
+
+    // These live for the whole session; only their contents are rebuilt per
+    // frame, and the persistent BLASes survive across frames by design.
+    Host::GpuAllocator alloc;
+    Host::AccelBuilder accel;
+    if (!alloc.Init(&gpu) || !accel.Init(&gpu, &alloc))
+    {
+        printf("FATAL: acceleration structure init failed: %s\n",
+               accel.LastError().c_str());
+        return 1;
+    }
 
     Host::SceneReceiver rx;
 
@@ -224,9 +405,22 @@ int main(int argc, char** argv)
 
         // One geometry becomes one BLAS, so an unbounded cache is an
         // unbounded number of acceleration structures, not merely wasted RAM.
-        if (retention) rx.EvictUnused(retention);
+        if (retention)
+        {
+            rx.EvictUnused(retention);
+            // Structures whose geometry has gone must go with it, or they
+            // would keep GPU memory alive for meshes nothing references.
+            accel.PruneOrphans(rx);
+        }
 
-        if (!quiet) ReportFrame(rx);
+        if (!accel.BuildFrame(rx))
+        {
+            printf("FATAL: acceleration structure build failed: %s\n",
+                   accel.LastError().c_str());
+            break;
+        }
+
+        if (!quiet) { ReportFrame(rx); ReportAccel(accel.Stats()); }
         ++reported;
         if (maxFrames && reported >= maxFrames) break;
     }

@@ -32,6 +32,8 @@ set(HOST_SOURCES
     main.cpp
     scene_receiver.cpp
     vk_device.cpp
+    vk_alloc.cpp
+    vk_accel.cpp
     ../ipc/shared_ring.cpp
 )
 

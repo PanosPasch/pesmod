@@ -495,6 +495,42 @@ The Intel integrated GPU is enumerated and correctly rejected. All ten
 acceleration-structure and ray-pipeline entry points resolve through
 `vkGetDeviceProcAddr`; none is exported by the loader library.
 
+### 6.4 Acceleration structures
+
+Measurement drove the shape here. The obvious mapping — one geometry, one
+BLAS — does not survive this game: 82% of geometry ids are used in exactly
+one draw ever, and the worst offenders are 4-vertex quads drawn hundreds of
+times per frame from a shared index buffer (crowd, shadows, grass). One BLAS
+per quad would mean tens of thousands of structures, nearly all built once
+and discarded.
+
+So geometry is split by size:
+
+| Class | Threshold | Handling |
+| ----- | --------- | -------- |
+| Sprites | <= 2 triangles | transformed to world on the CPU, merged into **one** BLAS rebuilt per frame, one TLAS instance |
+| Meshes | larger | persistent BLAS keyed by geometry id, rebuilt only when the content hash changes |
+
+The persistent path is what makes CPU-skinned players affordable: their
+topology never changes, so the buffers are reused and only the vertices are
+re-uploaded.
+
+**Transforms.** A TLAS instance needs an affine object-to-world matrix, but
+shader draws only produce a combined WVP (c58..c61). The world matrix is
+recovered as `WVP * inverse(VP)` using the view-projection shared by the
+frame. That inversion is only as good as the VP it is given, so every
+recovered matrix is checked for affinity and the failures are counted rather
+than silently used — a wrong VP would otherwise scatter geometry across the
+scene with no error anywhere.
+
+**Batching.** Builds are prepared first and recorded into a single command
+buffer with sub-allocated scratch. Submitting and waiting per structure
+measured ~7 ms of overhead each; the self-test dropped from 22.5 ms to
+7.8 ms on that change alone, and the cost no longer scales with BLAS count.
+
+`PESModHost --astest` pushes a synthetic scene through the real transport and
+asserts the whole chain, so the GPU path is testable without a running game.
+
 ---
 
 ## 7. Roadmap

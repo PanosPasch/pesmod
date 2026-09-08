@@ -283,6 +283,8 @@ bool VulkanDevice::SelectPhysicalDevice(const VulkanDeviceOptions& options)
     m_rtProperties.maxGeometryCount           = asProps.maxGeometryCount;
     m_rtProperties.maxInstanceCount           = asProps.maxInstanceCount;
     m_rtProperties.maxPrimitiveCount          = asProps.maxPrimitiveCount;
+    m_rtProperties.minScratchOffsetAlignment  =
+        asProps.minAccelerationStructureScratchOffsetAlignment;
 
     // Queue family: one that can do graphics and compute. RT dispatch and AS
     // builds both go on a graphics-capable queue here; splitting them across

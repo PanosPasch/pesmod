@@ -39,6 +39,7 @@ namespace Host
         uint64_t maxInstanceCount;
         uint64_t maxPrimitiveCount;
         uint32_t maxRayDispatchInvocationCount;
+        uint32_t minScratchOffsetAlignment;   // for packing builds together
     };
 
     // Extension entry points are not exported by the loader library, so each
