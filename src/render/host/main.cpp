@@ -43,7 +43,8 @@ namespace
             "  --section <name>   shared section to attach to\n"
             "                     (default: %s)\n"
             "  --frames <n>       exit after n completed frames (0 = run until Ctrl-C)\n"
-            "  --retain <frames>  drop cached geometry unused this long (default 300)\n"
+            "  --retain <frames>  drop cached geometry unused this long (default 900;\n"
+            "                     must exceed the producer's 300-frame retention)\n"
             "  --quiet            only print the summary\n"
             "  --probe            create the Vulkan RT device, report, exit\n"
             "  --no-validation    disable Vulkan validation layers\n"
@@ -141,7 +142,10 @@ int main(int argc, char** argv)
 {
     const char* section = SceneIPC::kDefaultSectionName;
     uint64_t    maxFrames = 0;
-    uint64_t    retention = 300;   // frames a cached resource survives unused
+    // Must stay comfortably above the producer's own 300-frame retention:
+    // the producer only re-sends geometry it has forgotten, so the host must
+    // never drop something the producer still believes is cached.
+    uint64_t    retention = 900;
     bool        quiet = false;
     bool        probeOnly = false;
     bool        validation = true;

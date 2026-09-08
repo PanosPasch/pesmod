@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <cstring>
 #include <unordered_map>
+#include <set>
 #include <vector>
 
 using namespace SceneIPC;
@@ -31,8 +32,40 @@ namespace
     std::unordered_map<uint64_t, uint32_t> g_sentGeometry;
     std::unordered_map<uint64_t, uint32_t> g_sentTextures;
 
+    // Last frame each geometry id was actually drawn.
+    //
+    // This exists because the producer's "already sent" set and the host's
+    // resident cache are two caches with no invalidation channel between
+    // them. When the host evicted a geometry the producer still believed was
+    // sent, the producer never re-sent it and the host was left with
+    // instances referencing geometry it did not have.
+    //
+    // The fix is an ordering invariant rather than a new message: the
+    // producer forgets an id after kGeometryRetentionFrames, and the host
+    // keeps entries for strictly longer (its --retain default is 3x this).
+    // Anything the producer still believes cached was therefore used
+    // recently enough that the host cannot yet have dropped it.
+    std::unordered_map<uint64_t, uint64_t> g_geometryLastUsed;
+    const uint64_t kGeometryRetentionFrames = 300;
+
     LightingDesc g_lastLighting;
     bool         g_lightingSent = false;
+
+    void PruneSentGeometry(uint64_t frameIndex)
+    {
+        if (frameIndex < kGeometryRetentionFrames) return;
+        const uint64_t cutoff = frameIndex - kGeometryRetentionFrames;
+
+        for (auto it = g_geometryLastUsed.begin(); it != g_geometryLastUsed.end(); )
+        {
+            if (it->second < cutoff)
+            {
+                g_sentGeometry.erase(it->first);
+                it = g_geometryLastUsed.erase(it);
+            }
+            else ++it;
+        }
+    }
 
     uint32_t g_instancesThisFrame = 0;
     uint32_t g_droppedThisFrame   = 0;
@@ -51,16 +84,35 @@ namespace
     // records which ones actually moved.
     struct ChurnRecord
     {
-        uint32_t distinctIds;
-        uint32_t firstStartIndex,  lastStartIndex;
-        uint32_t firstMinIndex,    lastMinIndex;
-        uint32_t firstBaseVertex,  lastBaseVertex;
-        uint32_t firstStartVertex, lastStartVertex;
-        uint32_t firstContentHash, lastContentHash;
-        uint64_t lastFullId;
+        // Distinct ids, not transitions. The first version of this counted
+        // how often the id *changed*, which for a key covering N draws per
+        // frame just reports N x frames and says nothing about churn.
+        std::set<uint64_t> distinctIds;
+        bool               overflowed;
+
+        // A short history of consecutive samples for the worst key. If the
+        // same object keeps its offsets frame to frame the values repeat on
+        // a cycle; if the offsets drift, they do not. That distinction is
+        // the whole question.
+        struct Sample
+        {
+            uint64_t frame;
+            uint64_t id;
+            uint32_t startIndex, minIndex, vertexCount;
+        };
+        Sample   samples[16];
+        uint32_t sampleCount;
     };
+
     std::unordered_map<uint64_t, ChurnRecord> g_churn;
-    const uint32_t kChurnReportInterval = 900;   // ~15s at 60fps
+
+    // Per-id use counts. An id drawn in exactly one frame ever was never
+    // reused, which is the signature of an identity derived from buffer
+    // placement rather than from the mesh itself.
+    std::unordered_map<uint64_t, uint32_t> g_idFrameCount;
+
+    const uint32_t kMaxTrackedIdsPerKey  = 4096;
+    const uint32_t kChurnReportInterval  = 900;   // ~15s at 60fps
 
     // ── Hashing ──────────────────────────────────────────────────────────
     inline uint64_t Mix64(uint64_t h, uint64_t v)
@@ -102,12 +154,10 @@ namespace
         return h ? h : 1ull;   // never hand out 0; the host treats it as "none"
     }
 
-    // Records one draw against a key that deliberately excludes every buffer
-    // offset, so a key with many distinct ids proves the offsets are what is
-    // churning — and the first/last samples say which ones moved.
+    // Groups draws by a key that deliberately excludes every buffer offset.
+    // A key holding many *distinct* ids means the offsets are what varies.
     void RecordChurn(uint32_t vbId, uint32_t ibId, const DrawCallInfo& info,
-                     uint32_t vertexCount, uint32_t baseVertex,
-                     uint64_t fullId, uint32_t contentHash)
+                     uint32_t vertexCount, uint64_t fullId, uint64_t frameIndex)
     {
         uint64_t reduced = 0xcbf29ce484222325ull;
         reduced = Mix64(reduced, vbId);
@@ -116,62 +166,80 @@ namespace
         reduced = Mix64(reduced, vertexCount);
 
         ChurnRecord& r = g_churn[reduced];
-        if (r.distinctIds == 0)
+        if (!r.overflowed)
         {
-            r.firstStartIndex  = info.startIndex;
-            r.firstMinIndex    = info.minIndex;
-            r.firstBaseVertex  = baseVertex;
-            r.firstStartVertex = info.startVertex;
-            r.firstContentHash = contentHash;
-            r.distinctIds      = 1;
-            r.lastFullId       = fullId;
+            if (r.distinctIds.size() < kMaxTrackedIdsPerKey)
+                r.distinctIds.insert(fullId);
+            else
+                r.overflowed = true;
         }
-        else if (fullId != r.lastFullId)
+
+        // Keep the most recent samples, oldest shifted out.
+        const uint32_t kSamples = 16;
+        if (r.sampleCount < kSamples)
         {
-            ++r.distinctIds;
-            r.lastFullId = fullId;
+            ChurnRecord::Sample& sm = r.samples[r.sampleCount++];
+            sm.frame = frameIndex; sm.id = fullId;
+            sm.startIndex = info.startIndex; sm.minIndex = info.minIndex;
+            sm.vertexCount = vertexCount;
         }
-        r.lastStartIndex  = info.startIndex;
-        r.lastMinIndex    = info.minIndex;
-        r.lastBaseVertex  = baseVertex;
-        r.lastStartVertex = info.startVertex;
-        r.lastContentHash = contentHash;
+        else
+        {
+            for (uint32_t i = 1; i < kSamples; ++i) r.samples[i - 1] = r.samples[i];
+            ChurnRecord::Sample& sm = r.samples[kSamples - 1];
+            sm.frame = frameIndex; sm.id = fullId;
+            sm.startIndex = info.startIndex; sm.minIndex = info.minIndex;
+            sm.vertexCount = vertexCount;
+        }
+
+        ++g_idFrameCount[fullId];
     }
 
     void ReportChurn()
     {
-        // Only the worst offenders matter; a mesh with a stable id has 1.
-        const ChurnRecord* worst[3] = { nullptr, nullptr, nullptr };
+        const ChurnRecord* worst = nullptr;
+        size_t worstCount = 0;
         uint32_t stableKeys = 0, churningKeys = 0;
+
         for (auto it = g_churn.begin(); it != g_churn.end(); ++it)
         {
             const ChurnRecord& r = it->second;
-            if (r.distinctIds <= 1) { ++stableKeys; continue; }
+            const size_t n = r.distinctIds.size();
+            if (n <= 1) { ++stableKeys; continue; }
             ++churningKeys;
-            for (int s = 0; s < 3; ++s)
-                if (!worst[s] || r.distinctIds > worst[s]->distinctIds)
-                {
-                    for (int m = 2; m > s; --m) worst[m] = worst[m - 1];
-                    worst[s] = &r;
-                    break;
-                }
+            if (!worst || n > worstCount) { worst = &r; worstCount = n; }
         }
 
-        Logger::Log("[Export] geometry id churn: %u stable keys, %u churning "
-                    "(cache holds %u ids)", stableKeys, churningKeys,
+        // An id drawn in exactly one frame ever was never reused, which is
+        // what an identity derived from buffer placement produces.
+        uint64_t onceOnly = 0;
+        for (auto it = g_idFrameCount.begin(); it != g_idFrameCount.end(); ++it)
+            if (it->second <= 1) ++onceOnly;
+
+        Logger::Log("[Export] churn: %u stable keys, %u multi-id keys | "
+                    "%llu ids total, %llu used in only one draw ever (%.1f%%) | "
+                    "sent-cache %u",
+                    stableKeys, churningKeys,
+                    (unsigned long long)g_idFrameCount.size(),
+                    (unsigned long long)onceOnly,
+                    g_idFrameCount.empty() ? 0.0
+                        : (100.0 * onceOnly / g_idFrameCount.size()),
                     (uint32_t)g_sentGeometry.size());
-        for (int s = 0; s < 3 && worst[s]; ++s)
+
+        if (worst)
         {
-            const ChurnRecord& r = *worst[s];
-            Logger::Log("  #%d: %u ids for one mesh | startIndex %u->%u | "
-                        "minIndex %u->%u | baseVertex %u->%u | "
-                        "startVertex %u->%u | contentHash %08X->%08X",
-                        s + 1, r.distinctIds,
-                        r.firstStartIndex,  r.lastStartIndex,
-                        r.firstMinIndex,    r.lastMinIndex,
-                        r.firstBaseVertex,  r.lastBaseVertex,
-                        r.firstStartVertex, r.lastStartVertex,
-                        r.firstContentHash, r.lastContentHash);
+            Logger::Log("  worst key: %llu distinct ids%s. Recent draws "
+                        "(frame / startIndex / minIndex / vtx):",
+                        (unsigned long long)worstCount,
+                        worst->overflowed ? " (capped)" : "");
+            for (uint32_t i = 0; i < worst->sampleCount; ++i)
+            {
+                const ChurnRecord::Sample& sm = worst->samples[i];
+                Logger::Log("    f%-8llu si=%-6u mi=%-6u vtx=%-5u id=%016llX",
+                            (unsigned long long)sm.frame, sm.startIndex,
+                            sm.minIndex, sm.vertexCount,
+                            (unsigned long long)sm.id);
+            }
         }
     }
 
@@ -428,6 +496,8 @@ void EndFrame()
     else
         ++g_stats.writeFailures;
 
+    PruneSentGeometry(g_frameIndex);
+
     if (g_stats.framesSent && (g_stats.framesSent % kChurnReportInterval) == 0)
         ReportChurn();
 }
@@ -536,7 +606,7 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
                                            g_vertexScratch.size());
 
     RecordChurn(vbInfo->id, ibInfo ? ibInfo->id : 0u, info, vertexCount,
-                state.baseVertexIndex, geometryId, contentHash);
+                geometryId, g_frameIndex);
 
     auto sent = g_sentGeometry.find(geometryId);
     if (sent == g_sentGeometry.end() || sent->second != contentHash)
@@ -574,6 +644,10 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
         }
         payload.resize(vbBytes);
     }
+
+    // Touch it whether or not it was re-uploaded: retention is about when a
+    // geometry was last *drawn*, not when it last changed.
+    g_geometryLastUsed[geometryId] = g_frameIndex;
 
     // ── Materials ────────────────────────────────────────────────────────
     uint64_t baseTextureId = 0, normalTextureId = 0;
