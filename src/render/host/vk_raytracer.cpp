@@ -1,5 +1,6 @@
 // vk_raytracer.cpp
 #include "vk_raytracer.h"
+#include "image_write.h"
 
 #include <windows.h>
 #include <cstdio>
@@ -519,6 +520,21 @@ bool RayTracer::SaveImage(const char* path)
     copy.imageExtent      = { m_width, m_height, 1 };
     vkCmdCopyImageToBuffer(cmd, m_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            readback.buffer, 1, &copy);
+
+    // Back to GENERAL. The descriptor written at init names GENERAL, so an
+    // image left in TRANSFER_SRC_OPTIMAL makes every subsequent trace write
+    // through a descriptor whose layout no longer matches the image — which
+    // is exactly what happens in the live loop, where a save is followed by
+    // more frames rather than by shutdown.
+    VkImageMemoryBarrier toGeneral = toSrc;
+    toGeneral.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toGeneral.newLayout     = VK_IMAGE_LAYOUT_GENERAL;
+    toGeneral.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    toGeneral.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                         0, 0, nullptr, 0, nullptr, 1, &toGeneral);
+
     vkEndCommandBuffer(cmd);
 
     VkSubmitInfo si{};
@@ -529,33 +545,14 @@ bool RayTracer::SaveImage(const char* path)
     vkQueueWaitIdle(m_device->GraphicsQueue());
     vkFreeCommandBuffers(m_device->Device(), m_commandPool, 1, &cmd);
 
-    // Binary PPM: no library, and every image viewer and diff tool reads it.
-    FILE* f = nullptr;
-    fopen_s(&f, path, "wb");
-    if (!f)
-    {
-        m_alloc->DestroyBuffer(readback);
-        m_lastError = std::string("cannot write ") + path;
-        return false;
-    }
-    fprintf(f, "P6\n%u %u\n255\n", m_width, m_height);
-
-    const uint8_t* src = (const uint8_t*)readback.mapped;
-    std::vector<uint8_t> row(m_width * 3);
-    for (uint32_t y = 0; y < m_height; ++y)
-    {
-        for (uint32_t x = 0; x < m_width; ++x)
-        {
-            row[x * 3 + 0] = src[(y * m_width + x) * 4 + 0];
-            row[x * 3 + 1] = src[(y * m_width + x) * 4 + 1];
-            row[x * 3 + 2] = src[(y * m_width + x) * 4 + 2];
-        }
-        fwrite(row.data(), 1, row.size(), f);
-    }
-    fclose(f);
+    // The extension picks the encoder; see image_write.h for why there are
+    // two of them.
+    const bool ok = WriteImage(path, (const uint8_t*)readback.mapped,
+                               m_width, m_height);
+    if (!ok) m_lastError = std::string("cannot write ") + path;
 
     m_alloc->DestroyBuffer(readback);
-    return true;
+    return ok;
 }
 
 void RayTracer::Shutdown()

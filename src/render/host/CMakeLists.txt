@@ -35,6 +35,7 @@ set(HOST_SOURCES
     vk_alloc.cpp
     vk_accel.cpp
     vk_raytracer.cpp
+    image_write.cpp
     ../ipc/shared_ring.cpp
 )
 
@@ -78,7 +79,8 @@ add_custom_target(PESModShaders DEPENDS ${SHADER_SPV})
 
 add_executable(PESModHost ${HOST_SOURCES})
 add_dependencies(PESModHost PESModShaders)
-target_link_libraries(PESModHost PRIVATE Vulkan::Vulkan)
+# windowscodecs/ole32: WIC, for writing traced frames out as PNG.
+target_link_libraries(PESModHost PRIVATE Vulkan::Vulkan windowscodecs ole32)
 
 target_include_directories(PESModHost PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

@@ -58,7 +58,8 @@ namespace
             "  --trace-height <n> traced image height; the width follows the\n"
             "                     game aspect ratio (default 720, 0 = off)\n"
             "  --save-frame <n>   write the nth traced frame to disk\n"
-            "  --save-path <file> where to write it (traced_frame.ppm)\n"
+            "  --save-path <file> where to write it (default traced_frame.png;\n"
+            "                     a .ppm extension writes a PPM instead)\n"
             "  --no-validation    disable Vulkan validation layers\n"
             "  --help\n",
             SceneIPC::kDefaultSectionName);
@@ -349,8 +350,13 @@ namespace
             else
             {
                 check(true, "vkCmdTraceRaysKHR completed");
+
+                // The PPM is what the pixel checks below parse; the PNG is
+                // for looking at, since nothing on Windows previews a PPM.
                 check(tracer.SaveImage("astest.ppm"),
                       "traced image written to astest.ppm");
+                check(tracer.SaveImage("astest.png"),
+                      "traced image written to astest.png");
 
                 // "The trace completed" is not the same as "rays hit
                 // anything" — an empty TLAS or a broken camera produces a
@@ -473,7 +479,7 @@ int main(int argc, char** argv)
     // to keep it or the result comes out stretched. Only height is chosen.
     uint32_t    traceHeight = 720;
     uint64_t    saveFrame = 0;             // 1-based; 0 = never save
-    const char* savePath = "traced_frame.ppm";
+    const char* savePath = "traced_frame.png";
 
     for (int i = 1; i < argc; ++i)
     {
