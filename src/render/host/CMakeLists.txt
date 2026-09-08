@@ -1,0 +1,55 @@
+cmake_minimum_required(VERSION 3.20)
+project(PESModHost VERSION 1.0.0 LANGUAGES CXX)
+
+# ── CRITICAL: this target is 64-bit ──────────────────────────────────────
+# The opposite of the main PESMod build, and for the reason the whole
+# two-process split exists: NVIDIA's 32-bit Vulkan ICD exposes no ray tracing
+# extensions, so the renderer cannot live inside the 32-bit game process.
+# See docs/RENDERER.md section 1.
+#
+# It is a separate CMake project rather than another target in the parent
+# because a single CMake generate cannot produce both Win32 and x64 binaries.
+# Configure it on its own:
+#
+#   cmake -S src/render/host -B build-host -A x64
+#   cmake --build build-host --config Release
+#
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    message(FATAL_ERROR
+        "PESModHost must be built as 64-bit. Re-run cmake with -A x64.")
+endif()
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+set(HOST_SOURCES
+    main.cpp
+    scene_receiver.cpp
+    ../ipc/shared_ring.cpp
+)
+
+add_executable(PESModHost ${HOST_SOURCES})
+
+target_include_directories(PESModHost PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+)
+
+if(MSVC)
+    target_compile_options(PESModHost PRIVATE /W4 /EHsc)
+endif()
+
+# ── The IPC self-test ────────────────────────────────────────────────────
+# Built here as 64-bit; the 32-bit counterpart comes from the parent project.
+# Running one against the other is what proves the shared scene structures
+# have identical layout under both ABIs.
+add_executable(PESModIpcSelfTest
+    ../ipc/ipc_selftest.cpp
+    ../ipc/shared_ring.cpp
+)
+target_include_directories(PESModIpcSelfTest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+)
+if(MSVC)
+    target_compile_options(PESModIpcSelfTest PRIVATE /W4 /EHsc)
+endif()
