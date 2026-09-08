@@ -190,7 +190,10 @@ bool AccelBuilder::PrepareMeshBlas(const Geometry& geo, MeshBlas& out,
 
     job.build.sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     job.build.type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-    job.build.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    // ALLOW_DATA_ACCESS is what makes gl_HitTriangleVertexPositionsEXT work
+    // in the hit shader; without it position fetch reads nothing.
+    job.build.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+                              VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_KHR;
     job.build.mode          = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     job.build.geometryCount = 1;
     job.build.pGeometries   = &job.geometry;   // repointed after the vector settles
@@ -283,7 +286,8 @@ bool AccelBuilder::PrepareSpriteBlas(const std::vector<float>& positions,
     job.build.type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
     // Rebuilt from scratch every frame, so build speed matters far more than
     // the trace quality of a structure that lives for a single frame.
-    job.build.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+    job.build.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR |
+                              VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_KHR;
     job.build.mode          = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     job.build.geometryCount = 1;
     job.build.pGeometries   = &job.geometry;

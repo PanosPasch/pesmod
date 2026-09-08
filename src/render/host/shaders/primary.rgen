@@ -1,0 +1,43 @@
+#version 460
+// glslang only honours #include when this is enabled first.
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(location = 0) rayPayloadEXT vec3 hitColor;
+
+void main()
+{
+    const vec2 pixelCenter = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
+    const vec2 uv  = pixelCenter / vec2(gl_LaunchSizeEXT.xy);
+    const vec2 ndc = uv * 2.0 - 1.0;
+
+    // The ray is built from the same inverse view-projection the world
+    // transforms were factored with. That matters: the recovered basis is
+    // only defined up to an affine change of basis, so the camera and the
+    // geometry must come from the same matrix or they will not agree.
+    const vec3 origin = UnprojectToWorld(ndc, 0.0);
+    const vec3 target = UnprojectToWorld(ndc, 1.0);
+    const vec3 dir    = normalize(target - origin);
+
+    hitColor = vec3(0.0);
+
+    traceRayEXT(topLevel,
+                gl_RayFlagsOpaqueEXT,
+                0xFF,          // cull mask
+                0,             // sbtRecordOffset
+                0,             // sbtRecordStride
+                0,             // missIndex: the sky shader
+                origin, 0.0,
+                dir, 1.0e9,
+                0);            // payload location
+
+    const float exposure = max(scene.params.y, 1e-3);
+    vec3 color = hitColor * exposure;
+
+    // The game's colours are already in low dynamic range, so this is a
+    // gamma encode rather than a tonemap; anything stronger would crush the
+    // baked lighting the scene depends on.
+    color = pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.2));
+
+    imageStore(outputImage, ivec2(gl_LaunchIDEXT.xy), vec4(color, 1.0));
+}

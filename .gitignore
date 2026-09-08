@@ -77,3 +77,7 @@ desktop.ini
 .env
 .env.*
 !.env.example
+
+# Traced output from the self-test
+astest.ppm
+astest.png

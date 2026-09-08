@@ -17,6 +17,7 @@ namespace
         VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
         VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
         VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,   // AS build dependency
+        VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME,
         VK_KHR_SWAPCHAIN_EXTENSION_NAME
     };
 
@@ -318,9 +319,18 @@ bool VulkanDevice::CreateLogicalDevice(const VulkanDeviceOptions& options)
     // Feature chain. bufferDeviceAddress is not optional: acceleration
     // structure builds address their vertex and index data by device address,
     // not by descriptor.
+    // Position fetch lets the hit shader read the triangle vertices it hit
+    // without binding every mesh's buffers. That is what makes deriving a
+    // geometric normal cheap, which this game needs: its 24-byte vertex
+    // layout carries no normals at all.
+    VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR posFetch{};
+    posFetch.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR;
+    posFetch.rayTracingPositionFetch = VK_TRUE;
+
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtFeatures{};
     rtFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
     rtFeatures.rayTracingPipeline = VK_TRUE;
+    rtFeatures.pNext = &posFetch;
 
     VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeatures{};
     asFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;

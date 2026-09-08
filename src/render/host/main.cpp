@@ -16,6 +16,7 @@
 #include "vk_device.h"
 #include "vk_alloc.h"
 #include "vk_accel.h"
+#include "vk_raytracer.h"
 
 #include <windows.h>
 #include <cstdio>
@@ -109,7 +110,7 @@ namespace
     // means this covers the protocol, the receiver and the builder together,
     // and it needs no running game — which matters because the game side can
     // only be exercised by actually playing a match.
-    int RunAccelSelfTest(Host::VulkanDevice& gpu)
+    int RunAccelSelfTest(Host::VulkanDevice& gpu, const char* shaderDir)
     {
         const char* kSection = "Local\\PESMod.SceneStream.ASTest";
         printf("\n-------- acceleration structure self-test --------\n");
@@ -271,6 +272,96 @@ namespace
                alloc.BlockCount(), alloc.LiveAllocations(),
                alloc.BytesInUse() / (1024.0 * 1024.0));
 
+        // ── Trace it ─────────────────────────────────────────────────────
+        // Structures that build without validation errors still prove nothing
+        // about whether rays actually hit them, so the scene is traced and the
+        // resulting image is written out.
+        Host::RayTracer tracer;
+        if (!tracer.Init(&gpu, &alloc, shaderDir, 256, 256))
+        {
+            printf("  [FAIL] ray tracer init: %s\n", tracer.LastError().c_str());
+            ++failures;
+        }
+        else
+        {
+            Host::SceneUniforms u{};
+
+            // The camera is built from the same VP the instances were, so the
+            // recovered basis and the rays agree — which is the whole reason
+            // the factorisation only needs to be self-consistent.
+            Host::Math::Mat4 vp = Host::Math::Identity();
+            vp.m[0] = 0.15f; vp.m[5] = 0.15f; vp.m[10] = 0.01f; vp.m[14] = 0.5f;
+            Host::Math::Mat4 invVp;
+            Host::Math::Inverse(vp, invVp);
+            memcpy(u.invViewProj, invVp.m, sizeof(invVp.m));
+
+            // The game's own rig, straight from the shader constants.
+            const float dir[4]  = { -0.4968f, -0.7360f, 0.4600f, 0.0f };  // c95
+            const float col[4]  = {  0.97f,    0.97f,   0.97f,   0.0f };  // c94
+            const float axis[4] = {  0.0f,    -1.0f,    0.0f,    0.0f };  // c93
+            const float sky[4]  = {  0.53f,    0.50f,   0.42f,   0.0f };  // c92
+            const float gnd[4]  = {  0.22f,    0.20f,   0.18f,   0.0f };  // c91
+            const float amb[4]  = {  0.10f,    0.20f,   0.20f,   0.0f };  // c68
+            memcpy(u.lightDirection, dir,  sizeof(dir));
+            memcpy(u.lightColor,     col,  sizeof(col));
+            memcpy(u.hemisphereAxis, axis, sizeof(axis));
+            memcpy(u.skyColor,       sky,  sizeof(sky));
+            memcpy(u.groundColor,    gnd,  sizeof(gnd));
+            memcpy(u.ambient,        amb,  sizeof(amb));
+            u.params[0] = 1000.0f;   // shadow ray length
+            u.params[1] = 1.0f;      // exposure
+
+            if (!tracer.Trace(accel.Tlas(), u))
+            {
+                printf("  [FAIL] trace: %s\n", tracer.LastError().c_str());
+                ++failures;
+            }
+            else
+            {
+                check(true, "vkCmdTraceRaysKHR completed");
+                check(tracer.SaveImage("astest.ppm"),
+                      "traced image written to astest.ppm");
+
+                // "The trace completed" is not the same as "rays hit
+                // anything" — an empty TLAS or a broken camera produces a
+                // perfectly clean image of nothing. So the pixels are
+                // inspected: the corner must be background, and a
+                // meaningful share of the frame must differ from it.
+                FILE* img = nullptr;
+                fopen_s(&img, "astest.ppm", "rb");
+                if (!img) { check(false, "traced image readable"); }
+                else
+                {
+                    int w = 0, h = 0, maxv = 0;
+                    fscanf_s(img, "P6 %d %d %d", &w, &h, &maxv);
+                    fgetc(img);   // the single whitespace before the payload
+
+                    std::vector<uint8_t> px((size_t)w * h * 3);
+                    fread(px.data(), 1, px.size(), img);
+                    fclose(img);
+
+                    const uint8_t bg[3] = { px[0], px[1], px[2] };
+                    size_t differing = 0;
+                    for (size_t i = 0; i < px.size(); i += 3)
+                        if (px[i] != bg[0] || px[i+1] != bg[1] || px[i+2] != bg[2])
+                            ++differing;
+
+                    const double coverage = 100.0 * differing / ((double)w * h);
+                    check(differing > 0, "rays actually hit geometry");
+                    check(coverage < 99.0, "background is present, so the "
+                                           "camera is not inside the geometry");
+                    printf("  geometry covers %.1f%% of the frame; "
+                           "background rgb(%u,%u,%u)\n",
+                           coverage, bg[0], bg[1], bg[2]);
+                }
+                printf("  traced %ux%u in %.2f ms, SBT %llu bytes\n",
+                       tracer.Stats().width, tracer.Stats().height,
+                       tracer.Stats().traceMilliseconds,
+                       (unsigned long long)tracer.Stats().sbtBytes);
+            }
+        }
+        tracer.Shutdown();
+
         accel.Shutdown();
         alloc.Shutdown();
         printf("%s\n", failures == 0 ? "ALL CHECKS PASSED" : "FAILURES PRESENT");
@@ -345,6 +436,7 @@ int main(int argc, char** argv)
     bool        probeOnly = false;
     bool        asTest = false;
     bool        validation = true;
+    const char* shaderDir = "shaders";
 
     for (int i = 1; i < argc; ++i)
     {
@@ -356,6 +448,7 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--quiet")) quiet = true;
         else if (!strcmp(argv[i], "--probe")) probeOnly = true;
         else if (!strcmp(argv[i], "--astest")) asTest = true;
+        else if (!strcmp(argv[i], "--shaders") && i + 1 < argc) shaderDir = argv[++i];
         else if (!strcmp(argv[i], "--no-validation")) validation = false;
         else if (!strcmp(argv[i], "--help")) { PrintUsage(); return 0; }
         else { printf("unknown argument: %s\n\n", argv[i]); PrintUsage(); return 2; }
@@ -384,7 +477,7 @@ int main(int argc, char** argv)
     gpu.PrintCapabilities();
 
     if (probeOnly) return 0;
-    if (asTest)    return RunAccelSelfTest(gpu);
+    if (asTest)    return RunAccelSelfTest(gpu, shaderDir);
 
     printf("\nattaching to '%s'\n", section);
 

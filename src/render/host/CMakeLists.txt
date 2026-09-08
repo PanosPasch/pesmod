@@ -34,10 +34,50 @@ set(HOST_SOURCES
     vk_device.cpp
     vk_alloc.cpp
     vk_accel.cpp
+    vk_raytracer.cpp
     ../ipc/shared_ring.cpp
 )
 
+# ── Shaders ──────────────────────────────────────────────────────────────
+# Compiled to SPIR-V at build time. glslangValidator ships with the Vulkan
+# SDK, which find_package(Vulkan) already located.
+set(SHADER_SRC
+    shaders/primary.rgen
+    shaders/sky.rmiss
+    shaders/shadow.rmiss
+    shaders/primary.rchit
+)
+
+set(SHADER_OUT_DIR ${CMAKE_BINARY_DIR}/shaders)
+file(MAKE_DIRECTORY ${SHADER_OUT_DIR})
+
+find_program(GLSLANG_EXE
+    NAMES glslangValidator glslangValidator.exe
+    HINTS ${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE} $ENV{VULKAN_SDK}/Bin
+    REQUIRED)
+
+set(SHADER_SPV)
+foreach(SRC ${SHADER_SRC})
+    get_filename_component(FNAME ${SRC} NAME)
+    set(SPV ${SHADER_OUT_DIR}/${FNAME}.spv)
+    add_custom_command(
+        OUTPUT ${SPV}
+        # --target-env vulkan1.3 is required for the ray tracing and position
+        # fetch extensions the shaders use.
+        COMMAND ${GLSLANG_EXE} --target-env vulkan1.3
+                -I${CMAKE_CURRENT_SOURCE_DIR}/shaders
+                -o ${SPV} ${CMAKE_CURRENT_SOURCE_DIR}/${SRC}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${SRC}
+                ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common.glsl
+        COMMENT "Compiling ${FNAME} to SPIR-V"
+        VERBATIM)
+    list(APPEND SHADER_SPV ${SPV})
+endforeach()
+
+add_custom_target(PESModShaders DEPENDS ${SHADER_SPV})
+
 add_executable(PESModHost ${HOST_SOURCES})
+add_dependencies(PESModHost PESModShaders)
 target_link_libraries(PESModHost PRIVATE Vulkan::Vulkan)
 
 target_include_directories(PESModHost PRIVATE
