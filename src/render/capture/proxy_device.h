@@ -143,7 +143,13 @@ namespace Capture
         ProxyD3D8*        m_parent;
         LONG              m_refCount;
         DeviceState       m_state;
+        // True when the interception layer is doing work at all: either
+        // recording captures or streaming to the render host. Both need the
+        // same groundwork (resource registry, readable buffers, state shadow).
         bool              m_captureEnabled;
+        bool              m_streamEnabled;
         bool              m_hotkeyDown;
+        uint32_t          m_backBufferWidth;
+        uint32_t          m_backBufferHeight;
     };
 }

@@ -1,5 +1,6 @@
 // render_config.cpp
 #include "render_config.h"
+#include "ipc/shared_ring.h"
 #include "../utils/config.h"
 #include "../utils/logger.h"
 
@@ -14,6 +15,9 @@ namespace
     int         g_captureAtFrame = 0;                 // 0 = no auto capture
     bool        g_captureFirst3D = false;
     int         g_captureMin3D   = 100;
+    bool        g_stream         = false;
+    std::string g_streamSection  = SceneIPC::kDefaultSectionName;
+    int         g_streamRingMB   = 64;
     std::string g_captureDir     = "pesmod_capture";
     std::string g_reportPath     = "pesmod_render_report.md";
 }
@@ -29,6 +33,12 @@ void Load()
     g_captureAtFrame = Config::GetInt ("render", "capture_at_frame", 0);
     g_captureFirst3D = Config::GetBool("render", "capture_on_first_3d", false);
     g_captureMin3D   = Config::GetInt ("render", "capture_min_3d_draws", 100);
+    g_stream         = Config::GetBool("render", "stream", false);
+    g_streamRingMB   = Config::GetInt ("render", "stream_ring_mb", 64);
+
+    const std::string section = Config::GetString("render", "stream_section",
+                                                  SceneIPC::kDefaultSectionName);
+    if (!section.empty()) g_streamSection = section;
 
     const std::string dir = Config::GetString("render", "capture_dir",
                                               "pesmod_capture");
@@ -42,9 +52,10 @@ void Load()
 
     if (g_enabled)
         Logger::Log("[Render] Config: capture=%d key=0x%02X atFrame=%d "
-                    "onFirst3D=%d min3D=%d dir='%s' report='%s'",
+                    "onFirst3D=%d min3D=%d stream=%d dir='%s' report='%s'",
                     g_capture ? 1 : 0, g_captureKey, g_captureAtFrame,
                     g_captureFirst3D ? 1 : 0, g_captureMin3D,
+                    g_stream ? 1 : 0,
                     g_captureDir.c_str(), g_reportPath.c_str());
 }
 
@@ -56,5 +67,8 @@ int         CaptureHotkey()     { return g_captureKey; }
 int         CaptureAtFrame()    { return g_captureAtFrame; }
 bool        CaptureOnFirst3D()  { return g_captureFirst3D; }
 int         CaptureMin3DDraws() { return g_captureMin3D < 1 ? 1 : g_captureMin3D; }
+bool        StreamEnabled()     { return g_loaded && g_enabled && g_stream; }
+const char* StreamSection()     { return g_streamSection.c_str(); }
+int         StreamRingMB()      { return g_streamRingMB < 4 ? 4 : g_streamRingMB; }
 
 } // namespace RenderConfig

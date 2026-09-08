@@ -141,8 +141,10 @@ namespace
         memset(&inst, 0, sizeof(inst));
         inst.geometryId    = kTestGeometryId;
         inst.baseTextureId = kTestTextureId;
-        inst.flags         = kInstanceAlphaTest | kInstanceTwoSided;
-        for (int i = 0; i < 16; ++i) inst.worldTransform.m[i] = (float)(i * 2);
+        inst.flags         = kInstanceAlphaTest | kInstanceTwoSided |
+                             kInstanceWorldValid;
+        for (int i = 0; i < 16; ++i) inst.clipTransform.m[i]  = (float)(i * 2);
+        for (int i = 0; i < 16; ++i) inst.worldTransform.m[i] = (float)(i * 3);
         inst.baseColorFactor[0] = 1.0f; inst.baseColorFactor[3] = 0.5f;
         ring.TryWrite(kMsgInstance, &inst, sizeof(inst), nullptr, 0, true);
 
@@ -268,12 +270,18 @@ namespace
                 printf("kMsgInstance:\n");
                 Check(in->geometryId == kTestGeometryId, "instance geometryId");
                 Check(in->baseTextureId == kTestTextureId, "instance textureId");
-                Check(in->flags == (uint32_t)(kInstanceAlphaTest | kInstanceTwoSided),
-                      "flags at offset 104 not shifted");
+                Check(in->flags == (uint32_t)(kInstanceAlphaTest |
+                                              kInstanceTwoSided |
+                                              kInstanceWorldValid),
+                      "flags at offset 168 not shifted");
                 bool m = true;
                 for (int i = 0; i < 16; ++i)
-                    if (in->worldTransform.m[i] != (float)(i * 2)) m = false;
-                Check(m, "world transform intact");
+                    if (in->clipTransform.m[i] != (float)(i * 2)) m = false;
+                Check(m, "clip transform (WVP) intact");
+                m = true;
+                for (int i = 0; i < 16; ++i)
+                    if (in->worldTransform.m[i] != (float)(i * 3)) m = false;
+                Check(m, "world transform intact, and distinct from clip");
                 break;
             }
             case kMsgFrameEnd:

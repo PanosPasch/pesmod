@@ -2,6 +2,7 @@
 #include "proxy_device.h"
 #include "proxy_d3d8.h"
 #include "resource_registry.h"
+#include "scene_export.h"
 #include "../d3d8/d3d8_util.h"
 #include "../render_config.h"
 #include "../../utils/logger.h"
@@ -17,7 +18,10 @@ ProxyDevice8::ProxyDevice8(IDirect3DDevice8* real, ProxyD3D8* parent,
     , m_parent(parent)
     , m_refCount(1)
     , m_captureEnabled(captureEnabled)
+    , m_streamEnabled(RenderConfig::StreamEnabled())
     , m_hotkeyDown(false)
+    , m_backBufferWidth(pp.BackBufferWidth)
+    , m_backBufferHeight(pp.BackBufferHeight)
 {
     m_state.SetDefaults();
 
@@ -44,6 +48,8 @@ ProxyDevice8::ProxyDevice8(IDirect3DDevice8* real, ProxyD3D8* parent,
 
     if (m_captureEnabled)
         Frame::BeginFrame();
+    if (m_streamEnabled)
+        SceneExport::BeginFrame(0, m_backBufferWidth, m_backBufferHeight);
 }
 
 // ── IUnknown ─────────────────────────────────────────────────────────────
@@ -80,6 +86,7 @@ ULONG __stdcall ProxyDevice8::Release()
             Frame::WriteSessionReport(RenderConfig::SessionReportPath());
             Frame::Shutdown();
         }
+        if (m_streamEnabled) SceneExport::Shutdown();
         Logger::Log("[Render] Device proxy released after %u frames.",
                     Frame::CurrentFrameIndex());
         m_real->Release();
@@ -109,11 +116,21 @@ HRESULT __stdcall ProxyDevice8::Present(const RECT* pSrc, const RECT* pDst,
         PollHotkeys();
         Frame::EndFrame(m_real);
     }
+    if (m_streamEnabled)
+    {
+        // The lighting rig lives in vertex shader constants and changes
+        // rarely, so it is published once per frame and deduplicated inside.
+        SceneExport::UpdateLighting(m_state);
+        SceneExport::EndFrame();
+    }
 
     const HRESULT hr = m_real->Present(pSrc, pDst, hOverride, pDirty);
 
     if (m_captureEnabled)
         Frame::BeginFrame();
+    if (m_streamEnabled)
+        SceneExport::BeginFrame(Frame::CurrentFrameIndex(),
+                                m_backBufferWidth, m_backBufferHeight);
 
     return hr;
 }
@@ -132,6 +149,8 @@ HRESULT __stdcall ProxyDevice8::Reset(D3DPRESENT_PARAMETERS* pp)
         {
             m_state.viewport.Width  = pp->BackBufferWidth;
             m_state.viewport.Height = pp->BackBufferHeight;
+            m_backBufferWidth       = pp->BackBufferWidth;
+            m_backBufferHeight      = pp->BackBufferHeight;
             if (!pp->EnableAutoDepthStencil)
                 m_state.renderState[D3DRS_ZENABLE] = 0;
         }

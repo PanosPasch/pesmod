@@ -3,6 +3,7 @@
 #include "proxy_device.h"
 #include "frame_capture.h"
 #include "resource_registry.h"
+#include "scene_export.h"
 #include "../render_config.h"
 #include "../d3d8/d3d8_util.h"
 #include "../../utils/logger.h"
@@ -79,15 +80,25 @@ HRESULT __stdcall ProxyD3D8::CreateDevice(UINT Adapter, D3DDEVTYPE DeviceType,
     // A fresh device means every previously tracked resource is gone.
     Registry::Reset();
 
-    const bool capture = RenderConfig::CaptureEnabled();
-    if (capture)
+    // Streaming needs everything capture needs — the resource registry, the
+    // readable-buffer workaround and the state shadow — so either one turns
+    // the interception layer on. What differs is only whether frames are
+    // written to disk, which the capture triggers gate separately.
+    const bool capture   = RenderConfig::CaptureEnabled();
+    const bool streaming = RenderConfig::StreamEnabled();
+    const bool tracking  = capture || streaming;
+
+    if (tracking)
         Frame::Init(RenderConfig::CaptureDir());
+    if (streaming)
+        SceneExport::Init(RenderConfig::StreamSection(),
+                          (uint64_t)RenderConfig::StreamRingMB() * 1024ull * 1024ull);
 
     D3DPRESENT_PARAMETERS pp;
     if (pPresentationParameters) pp = *pPresentationParameters;
     else                         memset(&pp, 0, sizeof(pp));
 
-    *ppReturnedDeviceInterface = new ProxyDevice8(realDevice, this, pp, capture);
+    *ppReturnedDeviceInterface = new ProxyDevice8(realDevice, this, pp, tracking);
 
     // The device holds a reference to us for the lifetime of GetDirect3D.
     AddRef();

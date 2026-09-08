@@ -50,6 +50,10 @@ set(SOURCES
     src/render/capture/frame_capture.cpp
     src/render/capture/proxy_d3d8.cpp
     src/render/capture/proxy_device.cpp
+    src/render/capture/scene_export.cpp
+
+    # Shared with the 64-bit render host; see src/render/host/CMakeLists.txt.
+    src/render/ipc/shared_ring.cpp
 )
  
 # ── Build as shared library ───────────────────────────────────────────────

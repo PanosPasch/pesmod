@@ -44,7 +44,7 @@ namespace SceneIPC
 {
     // 'PSCN' — bumped whenever any structure below changes shape.
     static const uint32_t kSceneMagic   = 0x4E435350u;
-    static const uint32_t kSceneVersion = 1u;
+    static const uint32_t kSceneVersion = 2u;
 
     // Default shared mapping size. This is address space in the *32-bit*
     // process, which only has ~2 GB of it, so the default is deliberately
@@ -154,7 +154,20 @@ namespace SceneIPC
         uint64_t  geometryId;
         uint64_t  baseTextureId;    // 0 = untextured
         uint64_t  normalTextureId;  // 0 = none
-        Matrix4x4 worldTransform;   // object -> world, WVP with VP factored out
+
+        // What the game actually hands us. The 3D scene is drawn by vs.1.1
+        // shaders whose only transform is `m4x4 oPos, v0, c58` — a single
+        // *combined* world-view-projection matrix. There is no separate world
+        // matrix anywhere in the shader draws, so this is the ground truth.
+        Matrix4x4 clipTransform;
+
+        // Object -> world, which is what a TLAS instance needs. The producer
+        // can only fill this for the handful of fixed-function draws where
+        // SetTransform is genuinely in play; for shader draws the host derives
+        // it as clipTransform * inverse(viewProjection), since the camera is
+        // shared by every draw in a frame. Valid only with kInstanceWorldValid.
+        Matrix4x4 worldTransform;
+
         float     baseColorFactor[4];
         uint32_t  flags;            // InstanceFlags
         uint32_t  _pad0;
@@ -167,7 +180,8 @@ namespace SceneIPC
         kInstanceAlphaTest    = 1u << 1,
         kInstanceTwoSided     = 1u << 2,
         kInstancePreLit       = 1u << 3,   // bake vertex colour, do not relight
-        kInstanceNoShadow     = 1u << 4
+        kInstanceNoShadow     = 1u << 4,
+        kInstanceWorldValid   = 1u << 5    // worldTransform is filled in
     };
 
     // The game's own lighting rig, read from vertex shader constants rather
@@ -204,7 +218,7 @@ namespace SceneIPC
     SCENEIPC_ASSERT_LAYOUT(TextureDesc,   32);
     SCENEIPC_ASSERT_LAYOUT(Matrix4x4,     64);
     SCENEIPC_ASSERT_LAYOUT(FrameBegin,   160);
-    SCENEIPC_ASSERT_LAYOUT(InstanceDesc, 112);
+    SCENEIPC_ASSERT_LAYOUT(InstanceDesc, 176);
     SCENEIPC_ASSERT_LAYOUT(LightingDesc, 128);
     SCENEIPC_ASSERT_LAYOUT(FrameEnd,      16);
 
@@ -222,8 +236,9 @@ namespace SceneIPC
     static_assert(offsetof(TextureDesc,  format)       == 8,  "TextureDesc layout");
     static_assert(offsetof(FrameBegin,   view)         == 16, "FrameBegin layout");
     static_assert(offsetof(FrameBegin,   projection)   == 80, "FrameBegin layout");
-    static_assert(offsetof(InstanceDesc, worldTransform) == 24, "InstanceDesc layout");
-    static_assert(offsetof(InstanceDesc, flags)        == 104, "InstanceDesc layout");
+    static_assert(offsetof(InstanceDesc, clipTransform)  == 24,  "InstanceDesc layout");
+    static_assert(offsetof(InstanceDesc, worldTransform) == 88,  "InstanceDesc layout");
+    static_assert(offsetof(InstanceDesc, flags)          == 168, "InstanceDesc layout");
 
     #undef SCENEIPC_ASSERT_LAYOUT
 

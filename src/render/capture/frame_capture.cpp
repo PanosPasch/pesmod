@@ -1,6 +1,7 @@
 // frame_capture.cpp
 #include "frame_capture.h"
 #include "resource_registry.h"
+#include "scene_export.h"
 #include "../d3d8/d3d8_util.h"
 #include "../render_config.h"
 #include "../../utils/logger.h"
@@ -795,7 +796,10 @@ void BeginFrame()
 
     // Unattended trigger: capture a chosen frame with no key press. The game
     // runs fullscreen, so a hotkey is not always reachable.
-    const int autoFrame = RenderConfig::CaptureAtFrame();
+    // Disk captures are a capture-mode feature. With streaming alone the
+    // layer still tracks state and statistics, but writes nothing out.
+    const int autoFrame = RenderConfig::CaptureEnabled()
+                        ? RenderConfig::CaptureAtFrame() : 0;
     if (autoFrame > 0 && g_frameIndex == (uint32_t)autoFrame)
     {
         Logger::Log("[Capture] Auto-trigger at frame %d.", autoFrame);
@@ -872,7 +876,6 @@ const FrameStats& LastFrameStats() { return g_lastStats; }
 void OnDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
             const DrawCallInfo& info)
 {
-    (void)realDevice;
     if (!g_initialised) return;
 
     const Registry::VertexShaderInfo* decl = nullptr;
@@ -912,7 +915,8 @@ void OnDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
                     state.vertexShader,
                     D3D8Util::VertexShaderArgIsFvf(state.vertexShader)
                         ? "FVF" : "declaration");
-        if (RenderConfig::CaptureOnFirst3D() && !g_capturing)
+        if (RenderConfig::CaptureEnabled() &&
+            RenderConfig::CaptureOnFirst3D() && !g_capturing)
         {
             Logger::Log("[Capture] Arming capture for the next frame.");
             g_armed = true;
@@ -929,6 +933,11 @@ void OnDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
         MatrixTranslation(state.world, origin);
         AccumulateBounds(g_stats, origin);
     }
+
+    // Streaming reuses the same classification the capture layer already
+    // performed, so the export path hangs off it rather than reclassifying.
+    if (space == kSpaceWorld && SceneExport::IsActive())
+        SceneExport::OnWorldDraw(realDevice, state, info);
 
     if (!g_capturing) return;
 

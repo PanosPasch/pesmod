@@ -55,4 +55,21 @@ namespace RenderConfig
     // and lands on real gameplay.
     // [render] capture_min_3d_draws = 100
     int CaptureMin3DDraws();
+
+    // ── Scene streaming to the 64-bit render host ────────────────────────
+    // Publishes the world-space draw stream over shared memory so the host
+    // process can ray trace it. Independent of `capture`, but implies the
+    // same interception work (resource registry, readable buffers, state
+    // shadow), so enabling it turns those on too.
+    // [render] stream = 0|1   (default 0)
+    bool StreamEnabled();
+
+    // Shared section name; must match the host's --section argument.
+    // [render] stream_section = Local\PESMod.SceneStream
+    const char* StreamSection();
+
+    // Ring size in MB. This is address space inside the 32-bit game process,
+    // which only has about 2 GB of it, so keep it modest.
+    // [render] stream_ring_mb = 64
+    int StreamRingMB();
 }
