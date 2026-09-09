@@ -18,6 +18,21 @@
 
 namespace Host
 {
+    // Submits and waits, reporting what went wrong.
+    //
+    // Every submit in this renderer used to ignore its result. A lost device
+    // then produced an unwritten output image and kept going, which looks
+    // like corrupted rendering and says nothing about the cause - the whole
+    // point of a device loss is that everything after it is garbage. Naming
+    // it once is worth more than any amount of staring at the output.
+    //
+    // Returns false on any error; `what` names the caller in the message.
+    bool SubmitAndWait(VkQueue queue, VkCommandBuffer cmd, const char* what,
+                       std::string& outError);
+}
+
+namespace Host
+{
     struct VulkanDeviceOptions
     {
         bool enableValidation;   // validation layers, if installed

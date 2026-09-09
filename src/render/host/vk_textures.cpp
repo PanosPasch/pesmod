@@ -254,16 +254,13 @@ bool TextureCache::UploadImage(const SceneIPC::TextureDesc& desc,
 
     vkEndCommandBuffer(cmd);
 
-    VkSubmitInfo si{};
-    si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    si.commandBufferCount = 1;
-    si.pCommandBuffers    = &cmd;
-    vkQueueSubmit(m_device->GraphicsQueue(), 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(m_device->GraphicsQueue());
+    const bool submitted = SubmitAndWait(m_device->GraphicsQueue(), cmd,
+                                         "texture upload", m_lastError);
 
     vkFreeCommandBuffers(m_device->Device(), m_commandPool, 1, &cmd);
     m_alloc->DestroyBuffer(staging);
-    return true;
+    if (!submitted) DestroyImage(out);
+    return submitted;
 }
 
 void TextureCache::Sync(SceneReceiver& scene, uint32_t budget)

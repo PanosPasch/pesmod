@@ -460,3 +460,28 @@ void VulkanDevice::Destroy()
 }
 
 } // namespace Host
+
+namespace Host
+{
+bool SubmitAndWait(VkQueue queue, VkCommandBuffer cmd, const char* what,
+                   std::string& outError)
+{
+    VkSubmitInfo si{};
+    si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers    = &cmd;
+
+    VkResult r = vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
+    if (r == VK_SUCCESS) r = vkQueueWaitIdle(queue);
+    if (r == VK_SUCCESS) return true;
+
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s: %s (VkResult %d)", what,
+             r == VK_ERROR_DEVICE_LOST      ? "device lost" :
+             r == VK_ERROR_OUT_OF_DEVICE_MEMORY ? "out of device memory" :
+             r == VK_ERROR_OUT_OF_HOST_MEMORY   ? "out of host memory" :
+                                              "submit failed", (int)r);
+    outError = buf;
+    return false;
+}
+}

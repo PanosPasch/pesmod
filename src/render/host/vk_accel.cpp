@@ -46,7 +46,9 @@ namespace
     //
     // The normal is transformed by the same rows without translation, which
     // is what `m3x3 r8, v3, c0` does.
-    void SkinVertices(const Geometry& geo, const std::vector<float>& palette,
+}
+
+void SkinVertices(const Geometry& geo, const std::vector<float>& palette,
                       float indexScale, uint8_t* dst)
     {
         const SceneIPC::GeometryDesc& d = geo.desc;
@@ -118,6 +120,8 @@ namespace
         }
     }
 
+namespace
+{
     uint32_t TriangleCountOf(const Geometry& g)
     {
         const uint32_t indices = g.desc.indexCount ? g.desc.indexCount
@@ -300,8 +304,16 @@ bool AccelBuilder::PrepareMeshBlas(const Geometry& geo, MeshBlas& out,
     job.build.type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
     // ALLOW_DATA_ACCESS is what makes gl_HitTriangleVertexPositionsEXT work
     // in the hit shader; without it position fetch reads nothing.
-    job.build.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
-                              VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_KHR;
+    // A skinned mesh is rebuilt every frame - its pose changes even though
+    // its vertices do not - so build time is what matters for it, while a
+    // static mesh is built once and traced forever. Asking for a fast trace
+    // on several hundred per-frame rebuilds spends the whole frame in the
+    // builder.
+    const bool rebuiltEveryFrame = geo.desc.boneCount != 0;
+    job.build.flags = (rebuiltEveryFrame
+                          ? VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR
+                          : VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR) |
+                      VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_KHR;
     job.build.mode          = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     job.build.geometryCount = 1;
     job.build.pGeometries   = &job.geometry;   // repointed after the vector settles
@@ -605,14 +617,10 @@ bool AccelBuilder::RecordAndSubmit(std::vector<PendingBuild>& blasJobs,
 
     vkEndCommandBuffer(cmd);
 
-    VkSubmitInfo si{};
-    si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    si.commandBufferCount = 1;
-    si.pCommandBuffers    = &cmd;
-    vkQueueSubmit(m_device->GraphicsQueue(), 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(m_device->GraphicsQueue());
+    const bool submitted = SubmitAndWait(m_device->GraphicsQueue(), cmd,
+                                         "acceleration structure build", m_lastError);
     vkFreeCommandBuffers(m_device->Device(), m_commandPool, 1, &cmd);
-    return true;
+    return submitted;
 }
 
 bool AccelBuilder::ResolveViewProjection(const Frame& frame, Math::Mat4& outInverse)

@@ -42,6 +42,14 @@ namespace
         return FALSE;
     }
 
+    int g_failures = 0;
+
+    void check(bool ok, const char* what)
+    {
+        printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
+        if (!ok) ++g_failures;
+    }
+
     void PrintUsage()
     {
         printf(
@@ -153,6 +161,112 @@ namespace
         if (missing)
             printf("    WARNING: %u unresolved (%u evicted-then-reused, "
                    "%u never sent)\n", missing, evicted, neverSent);
+    }
+
+
+    // Checks the skinning kernel against arithmetic done by hand.
+    //
+    // Everything else about skinning is visible in the output; whether the
+    // palette is applied *correctly* is not - a plausible-looking player in
+    // the wrong pose reads the same as a right one. The values here are
+    // shaped like the game's: c57.z is 765, three times 255, so a bone index
+    // byte of n selects palette row 3n, exactly as `mul r10, v2, c57.z`
+    // followed by `m4x3 r11, v0, c0` does.
+    int RunSkinTest()
+    {
+        printf("-------- skinning --------\n\n");
+
+        // A 40-byte vertex, matching the layout the game's players use:
+        // position, weights, indices, normal, uv.
+        struct SkinVertex
+        {
+            float   px, py, pz;
+            uint8_t weights[4];   // BGRA in memory; x,y,z,w = R,G,B,A
+            uint8_t indices[4];
+            float   nx, ny, nz;
+            float   u, v;
+        };
+        static_assert(sizeof(SkinVertex) == 40, "test vertex layout");
+
+        Host::Geometry geo;
+        memset(&geo.desc, 0, sizeof(geo.desc));
+        geo.desc.vertexKind       = SceneIPC::kVertexLit;
+        geo.desc.vertexStride     = sizeof(SkinVertex);
+        geo.desc.vertexCount      = 2;
+        geo.desc.normalOffset     = 20;
+        geo.desc.uvOffset         = 32;
+        geo.desc.colorOffset      = SceneIPC::kNoVertexAttribute;
+        geo.desc.boneCount        = 2;
+        geo.desc.boneWeightOffset = 12;
+        geo.desc.boneIndexOffset  = 16;
+
+        SkinVertex src[2];
+        memset(src, 0, sizeof(src));
+
+        // Vertex 0: entirely bone 0.
+        src[0].px = 1.0f; src[0].py = 2.0f; src[0].pz = 3.0f;
+        src[0].nx = 0.0f; src[0].ny = 1.0f; src[0].nz = 0.0f;
+        src[0].u  = 0.25f; src[0].v = 0.75f;
+        src[0].indices[2] = 0;    // x = R = byte 2 -> bone 0
+        src[0].indices[1] = 1;    // y = G = byte 1 -> bone 1
+        src[0].weights[2] = 255;  // full weight on the first influence
+        src[0].weights[1] = 0;
+
+        // Vertex 1: half of each bone.
+        src[1] = src[0];
+        src[1].weights[2] = 128;
+        src[1].weights[1] = 128;
+
+        geo.vertices.assign((const uint8_t*)src,
+                            (const uint8_t*)src + sizeof(src));
+
+        // Bone 0 at rows 0..2 translates by (10, 20, 30); bone 1 at rows 3..5
+        // scales by 2. Rows are the m4x3 dot products, so row r is the r-th
+        // component of the result.
+        std::vector<float> palette(6 * 4, 0.0f);
+        palette[0*4+0] = 1.0f; palette[0*4+3] = 10.0f;   // x' = x + 10
+        palette[1*4+1] = 1.0f; palette[1*4+3] = 20.0f;   // y' = y + 20
+        palette[2*4+2] = 1.0f; palette[2*4+3] = 30.0f;   // z' = z + 30
+        palette[3*4+0] = 2.0f;
+        palette[4*4+1] = 2.0f;
+        palette[5*4+2] = 2.0f;
+
+        std::vector<uint8_t> dst(sizeof(src));
+        Host::SkinVertices(geo, palette, 765.0f, dst.data());
+        const SkinVertex* out = (const SkinVertex*)dst.data();
+
+        // Not called `near`: windows.h defines that as a macro.
+        auto close = [](float a, float b) { return fabs(a - b) < 1e-3f; };
+
+        // Bone 0 only: (1,2,3) + (10,20,30).
+        check(close(out[0].px, 11.0f) && close(out[0].py, 22.0f) &&
+              close(out[0].pz, 33.0f),
+              "a single-bone vertex takes that bone's transform");
+
+        // The normal gets the same rows without translation.
+        check(close(out[0].nx, 0.0f) && close(out[0].ny, 1.0f) &&
+              close(out[0].nz, 0.0f),
+              "the normal is rotated but not translated");
+
+        // Half of each: 0.502*(11,22,33) + 0.502*(2,4,6). The weights are
+        // bytes over 255, so 128 is 0.50196, not 0.5 - and the shader does
+        // not renormalise, so neither does this.
+        const float w = 128.0f / 255.0f;
+        check(close(out[1].px, w * 11.0f + w * 2.0f) &&
+              close(out[1].py, w * 22.0f + w * 4.0f) &&
+              close(out[1].pz, w * 33.0f + w * 6.0f),
+              "a two-bone vertex blends both, unnormalised as the shader does");
+
+        // Everything the pose does not touch has to survive intact.
+        check(out[1].u == src[1].u && out[1].v == src[1].v,
+              "texture coordinates pass through untouched");
+        check(out[1].indices[2] == src[1].indices[2] &&
+              out[1].weights[2] == src[1].weights[2],
+              "bone data passes through untouched");
+
+        printf("\n%s\n", g_failures == 0 ? "ALL CHECKS PASSED"
+                                         : "FAILURES PRESENT");
+        return g_failures == 0 ? 0 : 1;
     }
 
     // Builds a synthetic scene, pushes it through the real transport, and
@@ -411,11 +525,6 @@ namespace
         }
 
         const Host::AccelStats& st = accel.Stats();
-        int failures = 0;
-        auto check = [&](bool ok, const char* what) {
-            printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
-            if (!ok) ++failures;
-        };
 
         check(f.instances.size() == 4,      "4 instances decoded");
         check(rx.GeometryCount() == 3,      "3 geometries resident");
@@ -446,7 +555,7 @@ namespace
         if (!tracer.Init(&gpu, &alloc, shaderDir, 256, 256, textures.Capacity()))
         {
             printf("  [FAIL] ray tracer init: %s\n", tracer.LastError().c_str());
-            ++failures;
+            ++g_failures;
         }
         else
         {
@@ -481,7 +590,7 @@ namespace
                               &accel.InstanceRecords()))
             {
                 printf("  [FAIL] trace: %s\n", tracer.LastError().c_str());
-                ++failures;
+                ++g_failures;
             }
             else
             {
@@ -599,8 +708,8 @@ namespace
         textures.Shutdown();
         accel.Shutdown();
         alloc.Shutdown();
-        printf("%s\n", failures == 0 ? "ALL CHECKS PASSED" : "FAILURES PRESENT");
-        return failures == 0 ? 0 : 1;
+        printf("%s\n", g_failures == 0 ? "ALL CHECKS PASSED" : "FAILURES PRESENT");
+        return g_failures == 0 ? 0 : 1;
     }
 
     void ReportAccel(const Host::AccelStats& st)
@@ -673,6 +782,7 @@ int main(int argc, char** argv)
     bool        quiet = false;
     bool        probeOnly = false;
     bool        asTest = false;
+    bool        skinTest = false;
     bool        validation = true;
     std::string shaderDirStorage = ResolveShaderDir();
     const char* shaderDir = shaderDirStorage.c_str();
@@ -698,6 +808,7 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--quiet")) quiet = true;
         else if (!strcmp(argv[i], "--probe")) probeOnly = true;
         else if (!strcmp(argv[i], "--astest")) asTest = true;
+        else if (!strcmp(argv[i], "--skintest")) skinTest = true;
         else if (!strcmp(argv[i], "--shaders") && i + 1 < argc) shaderDir = argv[++i];
         else if (!strcmp(argv[i], "--trace-height") && i + 1 < argc)
             traceHeight = (uint32_t)strtoul(argv[++i], nullptr, 10);
@@ -736,6 +847,7 @@ int main(int argc, char** argv)
     gpu.PrintCapabilities();
 
     if (probeOnly) return 0;
+    if (skinTest)  return RunSkinTest();
     if (asTest)    return RunAccelSelfTest(gpu, shaderDir);
 
     printf("\nattaching to '%s'\n", section);

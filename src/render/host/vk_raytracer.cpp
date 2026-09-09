@@ -543,16 +543,12 @@ bool RayTracer::Trace(VkAccelerationStructureKHR tlas, const SceneUniforms& unif
 
     vkEndCommandBuffer(cmd);
 
-    VkSubmitInfo si{};
-    si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    si.commandBufferCount = 1;
-    si.pCommandBuffers    = &cmd;
-    vkQueueSubmit(m_device->GraphicsQueue(), 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(m_device->GraphicsQueue());
+    const bool submitted = SubmitAndWait(m_device->GraphicsQueue(), cmd,
+                                         "ray trace", m_lastError);
     vkFreeCommandBuffers(m_device->Device(), m_commandPool, 1, &cmd);
 
     m_stats.traceMilliseconds = NowMs() - started;
-    return true;
+    return submitted;
 }
 
 bool RayTracer::SaveImage(const char* path)
@@ -613,13 +609,18 @@ bool RayTracer::SaveImage(const char* path)
 
     vkEndCommandBuffer(cmd);
 
-    VkSubmitInfo si{};
-    si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    si.commandBufferCount = 1;
-    si.pCommandBuffers    = &cmd;
-    vkQueueSubmit(m_device->GraphicsQueue(), 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(m_device->GraphicsQueue());
+    const bool submitted = SubmitAndWait(m_device->GraphicsQueue(), cmd,
+                                         "ray trace", m_lastError);
     vkFreeCommandBuffers(m_device->Device(), m_commandPool, 1, &cmd);
+
+    // A failed readback leaves the buffer holding whatever was there, and
+    // writing that out is how a lost device came to look like corrupted
+    // rendering rather than a lost device.
+    if (!submitted)
+    {
+        m_alloc->DestroyBuffer(readback);
+        return false;
+    }
 
     // The extension picks the encoder; see image_write.h for why there are
     // two of them.

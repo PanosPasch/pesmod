@@ -44,6 +44,16 @@
 
 namespace Host
 {
+    // Applies the game's matrix palette to one mesh, writing world-relative
+    // positions and normals over the bone-local ones. `dst` must have room
+    // for desc.vertexCount * desc.vertexStride bytes.
+    //
+    // Exposed for the self-test: this mirrors the game's vertex shader
+    // arithmetic exactly, and the one thing that cannot be checked by looking
+    // at the output is whether it does so correctly.
+    void SkinVertices(const Geometry& geo, const std::vector<float>& palette,
+                      float indexScale, uint8_t* dst);
+
     // A draw at or below this many triangles is treated as a sprite and
     // merged rather than given its own acceleration structure. Two triangles
     // covers the quads that dominate the stream; the limit is deliberately
