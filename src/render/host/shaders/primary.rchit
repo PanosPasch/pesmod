@@ -152,6 +152,74 @@ void main()
     const vec3 hitPos = gl_WorldRayOriginEXT +
                         gl_WorldRayDirectionEXT * gl_HitTEXT;
 
+    // ── Sky occlusion ────────────────────────────────────────────────────
+    //
+    // The game's c92 term adds sky light to every surface as though nothing
+    // were ever in the way, because a rasteriser cannot ask what is. Asking
+    // is the first thing on this path the original renderer could not have
+    // done at all.
+    //
+    // The rays are short on purpose. A bounded reach makes this contact
+    // occlusion rather than a global term, which is both far less noisy at a
+    // handful of samples and closer to what is actually missing from the
+    // game's rig: the darkening where a player meets the grass, or where the
+    // stand steps meet their risers.
+    //
+    // This runs before the shadow ray, not after, because both use the same
+    // payload location - so whichever goes last is the one whose answer is
+    // still there when the shading runs.
+    float skyVisibility = 1.0;
+    const int aoSamples = int(scene.params.z);
+    if (aoSamples > 0)
+    {
+        const float reach = max(scene.params.w, 1.0);
+
+        // Relative to how far the ray travelled, not an absolute distance.
+        // Float precision scales with distance, so a fixed offset that
+        // clears the surface up close is lost in the noise far away - and a
+        // ray starting inside its own surface reports occlusion at random,
+        // which is grain rather than shading.
+        //
+        // It has to be relative for a second reason: the self-test's scene
+        // is a unit cube, where the half-unit the shadow ray uses would put
+        // every occlusion ray outside the geometry entirely and quietly
+        // report that nothing occludes anything.
+        const float aoBias = max(gl_HitTEXT * 2.0e-4, 1.0e-4);
+        uint rng = HashCombine(HashCombine(gl_LaunchIDEXT.x * 1973u,
+                                           gl_LaunchIDEXT.y * 9277u),
+                               uint(gl_PrimitiveID) * 26699u);
+
+        // Stratified, not independent: the samples are spread one per cell
+        // of a regular grid over the unit square and jittered inside it,
+        // which is what stops eight independent draws from clumping and
+        // reporting a visibility that no direction actually saw. One random
+        // rotation per pixel keeps neighbouring pixels from sharing the
+        // pattern and turning the variance into a visible tiling.
+        const float rot = RandomFloat(rng);
+        int unoccluded = 0;
+        for (int i = 0; i < aoSamples; ++i)
+        {
+            const float u1 = (float(i) + RandomFloat(rng)) / float(aoSamples);
+            const float u2 = fract(rot + RadicalInverse(uint(i)));
+            const vec3 d = CosineHemisphere(worldNormal, u1, u2);
+
+            // The same question as a shadow ray, so the same flags, the same
+            // miss shader and the same payload; only the direction and the
+            // reach differ.
+            shadowVisibility = 0.0;
+            traceRayEXT(topLevel,
+                        gl_RayFlagsTerminateOnFirstHitEXT |
+                        gl_RayFlagsSkipClosestHitShaderEXT,
+                        kMaskShadow,
+                        0, 0, 1,
+                        hitPos + worldNormal * aoBias, 0.0,
+                        d, reach,
+                        1);
+            if (shadowVisibility > 0.5) ++unoccluded;
+        }
+        skyVisibility = float(unoccluded) / float(aoSamples);
+    }
+
     // ── Direct light, with a traced shadow ───────────────────────────────
     // c95 points toward the light and is used unnegated, exactly as the
     // game's `dp3 r11.x, v1, c95` does. Only its direction is wanted here -
@@ -187,7 +255,7 @@ void main()
     // ── Shading ──────────────────────────────────────────────────────────
     // The whole rig, transcribed from vs_0007 in common.glsl rather than
     // reassembled here.
-    const vec3 lit = GameLighting(worldNormal, shadowVisibility);
+    const vec3 lit = GameLighting(worldNormal, shadowVisibility, skyVisibility);
 
     // Note what is deliberately *not* used: the 24-byte layout's vertex
     // colour. It already contains the game's own baked lighting, so folding

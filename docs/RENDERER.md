@@ -938,9 +938,9 @@ Done: the transport, the device, scene reconstruction, acceleration
 structures, a ray tracing pipeline that traces every live frame, ordered
 transparency by depth peeling, per-sprite materials, ray masks that put the
 game's non-occluding draws and its own textured sky back in the picture,
-smooth normals where the game has them, and a window of its own to put the
-result in. What remains is what turns a
-correct image into a better one than the game's.
+smooth normals where the game has them, traced sky occlusion on the game's
+own hemisphere term, and a window of its own to put the result in. What
+remains is what turns a correct image into a better one than the game's.
 
 1. **Overlap.** Every submit is followed by `vkQueueWaitIdle`, so structure
    builds and traces are fully serialised. Fences would let them overlap.
@@ -950,6 +950,11 @@ correct image into a better one than the game's.
    own. Splitting the merge in two would fix it.
 3. **Lighting beyond the game's rig.** The captured constants are the seed —
    directional `c95`/`c94`, hemisphere `c93`/`c92`/`c91`, specular
-   `c63`/`c70` — then physical stadium floodlights and a sky model.
+   `c63`/`c70` — then physical stadium floodlights and a sky model. Sky
+   occlusion is the first piece of this and is in; specular is next, since
+   the constants for it are already being captured.
 4. **Path tracing + denoise.** DLSS Ray Reconstruction is already present in
-   the game folder, making it the natural denoiser target.
+   the game folder, making it the natural denoiser target. Sky occlusion is
+   what makes the case for it: stratification alone got eight samples below
+   the surface texture's own grain, but every further bounce costs another
+   factor, and a denoiser is what buys them back.

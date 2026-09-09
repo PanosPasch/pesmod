@@ -79,6 +79,10 @@ namespace
             "  --save-every <n>   write every nth traced frame, numbered\n"
             "  --save-path <file> where to write it (default traced_frame.png;\n"
             "                     a .ppm extension writes a PPM instead)\n"
+            "  --ao <n>           sky occlusion rays per hit (default 8;\n"
+            "                     0 reproduces the game's own flat sky term)\n"
+            "  --ao-reach <units> how far they look, in the game's units\n"
+            "                     (default 150, about a metre and a half)\n"
             "  --headless         trace without opening a window (for tests\n"
             "                     and for saving frames over a recording)\n"
             "  --no-validation    disable Vulkan validation layers\n"
@@ -1100,6 +1104,77 @@ namespace
                            coverage,
                            differing ? 100.0 * inTopHalf / differing : 0.0,
                            bg[0], bg[1], bg[2]);
+
+                    // ── Sky occlusion ────────────────────────────────────
+                    //
+                    // Traced twice, because the thing worth asserting is a
+                    // relation between the two images rather than any
+                    // absolute value: occlusion can only ever take light
+                    // away. A brighter pixel means the hemisphere basis is
+                    // wrong, or the visibility is inverted, or the rays are
+                    // being fired into the surface - none of which an
+                    // absolute threshold would catch, and all of which this
+                    // does.
+                    Host::SceneUniforms ao = u;
+                    ao.params[2] = 8.0f;
+                    ao.params[3] = 2.0f;   // the test scene is a unit cube
+
+                    if (!tracer.Trace(accel.Tlas(), ao, &textures,
+                                      &accel.InstanceRecords(),
+                                      &accel.SpriteTriangles()))
+                    {
+                        check(false, "the occluded trace completed");
+                    }
+                    else if (!tracer.SaveImage("astest_ao.ppm"))
+                    {
+                        check(false, "occluded image written");
+                    }
+                    else
+                    {
+                        FILE* aoImg = nullptr;
+                        fopen_s(&aoImg, "astest_ao.ppm", "rb");
+                        int aw = 0, ah = 0, amax = 0;
+                        std::vector<uint8_t> apx;
+                        if (aoImg)
+                        {
+                            fscanf_s(aoImg, "P6 %d %d %d", &aw, &ah, &amax);
+                            fgetc(aoImg);
+                            apx.resize((size_t)aw * ah * 3);
+                            fread(apx.data(), 1, apx.size(), aoImg);
+                            fclose(aoImg);
+                        }
+
+                        check(aw == w && ah == h && apx.size() == px.size(),
+                              "the occluded image is the same size");
+
+                        if (apx.size() == px.size())
+                        {
+                            size_t darker = 0, brighter = 0;
+                            for (size_t i = 0; i < px.size(); ++i)
+                            {
+                                // One level of slack for the gamma encode
+                                // rounding differently either side of a
+                                // value that did not really change.
+                                if ((int)apx[i] + 1 < (int)px[i]) ++darker;
+                                if ((int)apx[i] > (int)px[i] + 1) ++brighter;
+                            }
+                            check(brighter == 0,
+                                  "sky occlusion only ever removes light");
+                            // Against what the scene actually covers, not
+                            // the frame: the test geometry is 3.5% of it.
+                            // Measured, 734 of the 6,882 covered channels
+                            // darken - about a tenth. The same check with
+                            // the ray offset sized for the game's units
+                            // rather than the scene's gave 6, because every
+                            // ray then started outside the geometry, so the
+                            // threshold has to sit between those and does.
+                            check(darker * 20 > differing * 3,
+                                  "sky occlusion actually darkened the scene");
+                            printf("  occlusion darkened %zu of %zu channels, "
+                                   "brightened %zu\n",
+                                   darker, px.size(), brighter);
+                        }
+                    }
                 }
                 printf("  traced %ux%u in %.2f ms, SBT %llu bytes\n",
                        tracer.Stats().width, tracer.Stats().height,
@@ -1200,6 +1275,14 @@ int main(int argc, char** argv)
     // The traced image is the output now, so a window is the default.
     // Batch work over a recording still wants no window at all.
     bool        headless = false;
+
+    // Sky occlusion. Eight rather than four: stratified, eight measured
+    // cleaner than the surface's own texture grain (7.7 against 8.0 with
+    // occlusion off) while four was still visibly speckled at 8.5 - and
+    // eight costs 0.6 ms more than four, not double, because stratified rays
+    // stay coherent.
+    uint32_t    aoSamples = 8;
+    float       aoReach   = 150.0f;   // ~1.5 m, at 100 units to the metre
     std::string shaderDirStorage = ResolveShaderDir();
     const char* shaderDir = shaderDirStorage.c_str();
     // Width is not an option because it is not free: the recovered inverse
@@ -1247,6 +1330,10 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--texture-budget") && i + 1 < argc)
             textureBudget = (uint32_t)strtoul(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--save-path") && i + 1 < argc) savePath = argv[++i];
+        else if (!strcmp(argv[i], "--ao") && i + 1 < argc)
+            aoSamples = (uint32_t)strtoul(argv[++i], nullptr, 10);
+        else if (!strcmp(argv[i], "--ao-reach") && i + 1 < argc)
+            aoReach = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--headless")) headless = true;
         else if (!strcmp(argv[i], "--no-validation")) validation = false;
         else if (!strcmp(argv[i], "--help")) { PrintUsage(); return 0; }
@@ -1487,6 +1574,8 @@ int main(int argc, char** argv)
             }
             u.params[0] = 20000.0f;   // shadow ray length, in the game's units
             u.params[1] = 1.0f;
+            u.params[2] = (float)aoSamples;
+            u.params[3] = aoReach;
 
             if (tracer.Trace(accel.Tlas(), u, &textures,
                              &accel.InstanceRecords(),

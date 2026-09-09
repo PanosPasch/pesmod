@@ -31,7 +31,9 @@ struct SceneUniforms
     vec4 ambient;           // c68
     vec4 lightingScale;     // c69
 
-    vec4 params;            // x = shadow ray max distance, y = exposure
+    // x = shadow ray max distance, y = exposure,
+    // z = sky occlusion rays per hit (0 disables), w = their reach
+    vec4 params;
 };
 
 // What a hit shader needs to shade a surface it did not know it would hit.
@@ -300,14 +302,79 @@ vec3 UnprojectToWorld(vec2 ndc, float depth)
 // c95 and c93 are deliberately not normalised: they arrive about 0.128 long
 // and the game dots them raw, so normalising them would multiply the
 // directional term by eight.
-vec3 GameLighting(vec3 normal, float shadowVisibility)
+// `skyVisibility` is the one term the game could not have computed. Its c92
+// sky contribution assumes every surface has a clear view of the sky, because
+// a rasteriser has no way to ask otherwise. A ray tracer can, and the answer
+// is what puts a player back in contact with the grass instead of floating a
+// shade above it. Pass 1.0 to get exactly what the game does.
+//
+// Only the sky term is attenuated: the ground term is not the sky, and the
+// directional term already has a traced shadow of its own.
+vec3 GameLighting(vec3 normal, float shadowVisibility, float skyVisibility)
 {
     float nDotL = max(dot(normal, scene.lightDirection.xyz), 0.0);
     vec3  lit   = scene.lightColor.rgb * nDotL * shadowVisibility;
 
     float t = dot(normal, scene.hemisphereAxis.xyz) * 0.5 + 0.5;
-    lit += scene.skyColor.rgb * t;
+    lit += scene.skyColor.rgb * t * skyVisibility;
     lit += scene.groundColor.rgb;
 
     return lit * scene.lightingScale.rgb + scene.ambient.rgb;
+}
+
+// ── Sampling ─────────────────────────────────────────────────────────────
+//
+// A hash rather than a stored sequence: every hit needs its own directions
+// and there is nowhere to keep them.
+//
+// Deliberately not seeded on the frame. With no accumulation and no denoiser
+// behind this, noise that changes every frame boils; noise that stands still
+// reads as fixed grain on a surface, which is much less distracting and is
+// what a temporal filter would want to start from anyway.
+uint HashCombine(uint seed, uint v)
+{
+    v *= 0x9E3779B9u;
+    v ^= v >> 15;
+    return seed ^ (v + 0x9E3779B9u + (seed << 6) + (seed >> 2));
+}
+
+float RandomFloat(inout uint state)
+{
+    // PCG-style advance; the well-mixed bits are the top ones.
+    state = state * 747796405u + 2891336453u;
+    uint w = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return float((w >> 22u) ^ w) * (1.0 / 4294967296.0);
+}
+
+// Van der Corput in base 2: the second half of a Hammersley sequence, which
+// spreads a small number of samples far more evenly around the circle than
+// independent draws do.
+float RadicalInverse(uint bits)
+{
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return float(bits) * 2.3283064365386963e-10;
+}
+
+// Cosine-weighted around `n`, which is the distribution the sky term wants:
+// the cosine falls out of the integral, so the estimator is the plain mean of
+// the visibility, with no weighting to get wrong.
+vec3 CosineHemisphere(vec3 n, float u1, float u2)
+{
+    // An orthonormal basis around n with no branch on which axis is safest
+    // to cross with - Duff et al., which is exact even as n.z approaches -1.
+    const float s = n.z >= 0.0 ? 1.0 : -1.0;
+    const float a = -1.0 / (s + n.z);
+    const float b = n.x * n.y * a;
+    const vec3  tangent   = vec3(1.0 + s * n.x * n.x * a, s * b, -s * n.x);
+    const vec3  bitangent = vec3(b, s + n.y * n.y * a, -n.y);
+
+    const float r   = sqrt(u1);
+    const float phi = 6.2831853 * u2;
+    return normalize(tangent * (r * cos(phi)) +
+                     bitangent * (r * sin(phi)) +
+                     n * sqrt(max(0.0, 1.0 - u1)));
 }

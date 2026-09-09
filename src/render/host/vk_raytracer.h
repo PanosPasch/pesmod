@@ -43,7 +43,9 @@ namespace Host
         float groundColor[4];
         float ambient[4];
         float lightingScale[4]; // c69
-        float params[4];        // x = shadow ray length, y = exposure
+        // x = shadow ray length, y = exposure,
+        // z = sky occlusion rays per hit (0 disables), w = their reach
+        float params[4];
     };
 
     struct TraceStats
