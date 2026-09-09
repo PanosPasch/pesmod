@@ -48,6 +48,7 @@ set(SHADER_SRC
     shaders/sky.rmiss
     shaders/shadow.rmiss
     shaders/primary.rchit
+    shaders/primary.rahit
 )
 
 set(SHADER_OUT_DIR ${CMAKE_BINARY_DIR}/shaders)

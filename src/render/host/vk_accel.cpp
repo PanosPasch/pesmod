@@ -188,7 +188,12 @@ bool AccelBuilder::PrepareMeshBlas(const Geometry& geo, MeshBlas& out,
     job.geometry.sType              = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
     job.geometry.geometryType       = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
     job.geometry.geometry.triangles = tri;
-    job.geometry.flags              = VK_GEOMETRY_OPAQUE_BIT_KHR;
+
+    // Deliberately not VK_GEOMETRY_OPAQUE_BIT_KHR. One BLAS can be referenced
+    // by several instances, and whether a surface is opaque is a property of
+    // the draw, not of the mesh - so opacity is decided per instance with
+    // FORCE_OPAQUE and the any-hit shader handles the rest.
+    job.geometry.flags              = 0;
 
     job.build.sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     job.build.type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
@@ -759,6 +764,18 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
         out.instanceShaderBindingTableRecordOffset = 0;
         out.flags = (inst.flags & kInstanceTwoSided)
                   ? VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR : 0;
+
+        // Anything the game drew without blending or alpha testing is a solid
+        // surface, and forcing it opaque skips the any-hit shader entirely -
+        // which is the fast path and covers most of the scene. The rest go
+        // through the alpha test, which is what stops the pitch's six blended
+        // overlays from fighting the grass they sit on.
+        // Both bits are set explicitly rather than leaving one implied by the
+        // geometry's own flags: opacity then depends only on what this loop
+        // decides, and reads the same way at the call site.
+        out.flags |= (inst.flags & (kInstanceAlphaBlend | kInstanceAlphaTest))
+                   ? VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR
+                   : VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
         out.accelerationStructureReference = blas.accel.address;
         tlasInstances.push_back(out);
     }
@@ -791,7 +808,10 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
         out.instanceCustomIndex = (uint32_t)records.size() & 0xFFFFFF;
         records.push_back(rec);
         out.mask  = 0xFF;
-        out.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+        // Forced opaque: the merged batch has no UVs, so there is nothing to
+        // alpha test against.
+        out.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR |
+                    VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
         out.accelerationStructureReference = m_spriteBlas.address;
         tlasInstances.push_back(out);
     }

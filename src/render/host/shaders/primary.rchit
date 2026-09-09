@@ -113,10 +113,13 @@ void main()
         // of 10,500 x 6,800 units), so the bias is scaled accordingly.
         const float bias = 0.5;
 
+        // Note the absence of gl_RayFlagsOpaqueEXT: the shadow ray runs the
+        // any-hit shader too, so the pitch's transparent overlays do not cast
+        // shadows on the grass they lie on. That costs traversal time and
+        // buys correctness where it is most visible.
         traceRayEXT(topLevel,
                     gl_RayFlagsTerminateOnFirstHitEXT |
-                    gl_RayFlagsSkipClosestHitShaderEXT |
-                    gl_RayFlagsOpaqueEXT,
+                    gl_RayFlagsSkipClosestHitShaderEXT,
                     0xFF,
                     0,          // sbtRecordOffset
                     0,          // sbtRecordStride

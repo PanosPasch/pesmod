@@ -87,6 +87,42 @@ vec2 VertexUv(FloatData verts, uint stride, uint uvOffset, uint index)
     return vec2(verts.v[base], verts.v[base + 1u]);
 }
 
+// The interpolated UV at a triangle hit. Shared by the closest-hit and
+// any-hit shaders so the alpha test and the shading sample cannot disagree
+// about where on the texture the ray landed.
+//
+// `bary2` is the hit attribute: the last two barycentrics, the first being
+// whatever remains.
+vec2 HitUv(InstanceRecord rec, uint primitiveID, vec2 bary2)
+{
+    FloatData verts = FloatData(rec.vertexAddress);
+
+    uvec3 tri;
+    const uint base = primitiveID * 3u;
+    if (rec.indexStride != 0u)
+    {
+        WordData idx = WordData(rec.indexAddress);
+        tri = uvec3(IndexAt(idx, rec.indexStride, base),
+                    IndexAt(idx, rec.indexStride, base + 1u),
+                    IndexAt(idx, rec.indexStride, base + 2u));
+    }
+    else
+    {
+        tri = uvec3(base, base + 1u, base + 2u);
+    }
+
+    const vec3 bary = vec3(1.0 - bary2.x - bary2.y, bary2.x, bary2.y);
+    return bary.x * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.x)
+         + bary.y * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.y)
+         + bary.z * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.z);
+}
+
+// Below this the surface is treated as absent rather than shaded. Chosen
+// against the game's own pitch layers: of the seven coplanar draws covering
+// the pitch, the two that are pure noise in a ray tracer have maximum alphas
+// of 0.14 and 0.25, while the grass base is 1.0 everywhere.
+const float kAlphaCutoff = 0.5;
+
 // Unprojects a point on the near or far plane back into world space.
 // D3D depth runs 0 at the near plane to 1 at the far plane, which is what
 // the game's projection produces and therefore what its inverse expects.

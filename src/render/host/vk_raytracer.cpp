@@ -106,6 +106,7 @@ bool RayTracer::CreateDescriptors()
     // layout is a mismatch rather than an unused binding.
     const VkShaderStageFlags kRtStages = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
                                          VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
+                                         VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                                          VK_SHADER_STAGE_MISS_BIT_KHR;
     bindings[3].stageFlags      = kRtStages;
 
@@ -169,14 +170,16 @@ bool RayTracer::CreatePipeline(const char* shaderDir)
 
     VkShaderModule rgen = VK_NULL_HANDLE, skyMiss = VK_NULL_HANDLE;
     VkShaderModule shadowMiss = VK_NULL_HANDLE, chit = VK_NULL_HANDLE;
+    VkShaderModule ahit = VK_NULL_HANDLE;
 
     if (!LoadShaderModule((dir + "/primary.rgen.spv").c_str(),   rgen))       return false;
     if (!LoadShaderModule((dir + "/sky.rmiss.spv").c_str(),      skyMiss))    return false;
     if (!LoadShaderModule((dir + "/shadow.rmiss.spv").c_str(),   shadowMiss)) return false;
     if (!LoadShaderModule((dir + "/primary.rchit.spv").c_str(),  chit))       return false;
+    if (!LoadShaderModule((dir + "/primary.rahit.spv").c_str(),  ahit))       return false;
 
-    VkPipelineShaderStageCreateInfo stages[4]{};
-    for (int i = 0; i < 4; ++i)
+    VkPipelineShaderStageCreateInfo stages[5]{};
+    for (int i = 0; i < 5; ++i)
     {
         stages[i].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         stages[i].pName = "main";
@@ -185,6 +188,7 @@ bool RayTracer::CreatePipeline(const char* shaderDir)
     stages[1].stage = VK_SHADER_STAGE_MISS_BIT_KHR;        stages[1].module = skyMiss;
     stages[2].stage = VK_SHADER_STAGE_MISS_BIT_KHR;        stages[2].module = shadowMiss;
     stages[3].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR; stages[3].module = chit;
+    stages[4].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;     stages[4].module = ahit;
 
     // Group order defines the SBT layout: raygen, then both miss shaders in
     // the order the shaders index them (0 = sky, 1 = shadow), then hit.
@@ -200,8 +204,11 @@ bool RayTracer::CreatePipeline(const char* shaderDir)
     groups[0].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR; groups[0].generalShader = 0;
     groups[1].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR; groups[1].generalShader = 1;
     groups[2].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR; groups[2].generalShader = 2;
+    // The any-hit shader joins the same hit group rather than adding one, so
+    // the shader binding table's layout does not change.
     groups[3].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
     groups[3].closestHitShader = 3;
+    groups[3].anyHitShader     = 4;
 
     VkPipelineLayoutCreateInfo pli{};
     pli.sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -216,7 +223,7 @@ bool RayTracer::CreatePipeline(const char* shaderDir)
 
     VkRayTracingPipelineCreateInfoKHR ci{};
     ci.sType                        = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR;
-    ci.stageCount                   = 4;
+    ci.stageCount                   = 5;
     ci.pStages                      = stages;
     ci.groupCount                   = 4;
     ci.pGroups                      = groups;
@@ -233,6 +240,7 @@ bool RayTracer::CreatePipeline(const char* shaderDir)
     vkDestroyShaderModule(m_device->Device(), skyMiss, nullptr);
     vkDestroyShaderModule(m_device->Device(), shadowMiss, nullptr);
     vkDestroyShaderModule(m_device->Device(), chit, nullptr);
+    vkDestroyShaderModule(m_device->Device(), ahit, nullptr);
 
     if (r != VK_SUCCESS)
     {

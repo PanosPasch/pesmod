@@ -226,6 +226,57 @@ namespace
                               payload.data(), (uint32_t)payload.size(), false);
         }
 
+        // A 4-triangle sheet for the alpha test. Four rather than two so it
+        // earns its own BLAS: the merged sprite batch is forced opaque and
+        // would never reach the any-hit shader.
+        {
+            struct LitVertex { float px, py, pz, nx, ny, nz, u, v; };
+            LitVertex verts[6] = {
+                { 0,0,0, 0,0,1, 0,0 }, { 4,0,0, 0,0,1, 1,0 },
+                { 4,4,0, 0,0,1, 1,1 }, { 0,4,0, 0,0,1, 0,1 },
+                { 0,0,1, 0,0,1, 0,0 }, { 4,0,1, 0,0,1, 1,0 },
+            };
+            uint16_t idx[12] = { 0,1,2,  0,2,3,  0,1,4,  1,5,4 };
+
+            SceneIPC::GeometryDesc gd{};
+            gd.geometryId   = 0x3333333300000004ull;
+            gd.vertexKind   = SceneIPC::kVertexLit;
+            gd.vertexStride = sizeof(LitVertex);
+            gd.vertexCount  = 6;
+            gd.indexCount   = 12;
+            gd.indexStride  = 2;
+            gd.contentHash  = 0x0F0F0F0Fu;
+
+            std::vector<uint8_t> payload(sizeof(verts) + sizeof(idx));
+            memcpy(payload.data(), verts, sizeof(verts));
+            memcpy(payload.data() + sizeof(verts), idx, sizeof(idx));
+            producer.TryWrite(SceneIPC::kMsgGeometry, &gd, sizeof(gd),
+                              payload.data(), (uint32_t)payload.size(), false);
+        }
+
+        // Fully transparent, and bright red so that failing to skip it is
+        // impossible to miss. This is the case that made the game's pitch
+        // into noise: six blended overlays sharing a plane with the grass.
+        const uint64_t kClearTextureId = 0x8888888800000005ull;
+        {
+            SceneIPC::TextureDesc td{};
+            td.textureId    = kClearTextureId;
+            td.format       = SceneIPC::kTexBGRA8;
+            td.width        = 4;
+            td.height       = 4;
+            td.mipLevels    = 1;
+            td.payloadBytes = 4 * 4 * 4;
+
+            std::vector<uint8_t> texels(td.payloadBytes, 0);
+            for (uint32_t i = 0; i < td.payloadBytes; i += 4)
+            {
+                texels[i + 2] = 255;   // R
+                texels[i + 3] = 0;     // A - the whole point
+            }
+            producer.TryWrite(SceneIPC::kMsgTexture, &td, sizeof(td),
+                              texels.data(), td.payloadBytes, false);
+        }
+
         // A solid-colour texture. Solid rather than patterned because the
         // check below has to hold for whichever texel the UVs land on: if
         // sampling works at all, the surface takes this hue.
@@ -271,14 +322,15 @@ namespace
         fb.renderHeight = 1080;
         fb.view         = Host::Math::Identity();   // deliberately wrong
         fb.projection   = Host::Math::Identity();   // deliberately wrong
-        fb.instanceCount = 3;
+        fb.instanceCount = 4;
         producer.TryWrite(SceneIPC::kMsgFrameBegin, &fb, sizeof(fb), nullptr, 0, true);
 
         // One mesh instance, and two sprites that must collapse into one.
-        const uint64_t ids[3] = { 0x1111111100000001ull,
+        const uint64_t ids[4] = { 0x1111111100000001ull,
                                   0x2222222200000002ull,
-                                  0x2222222200000002ull };
-        for (int i = 0; i < 3; ++i)
+                                  0x2222222200000002ull,
+                                  0x3333333300000004ull };
+        for (int i = 0; i < 4; ++i)
         {
             // clip = world * VP, exactly as the game's shaders compute it.
             // Instance 0 has an identity world, so its clip transform IS the
@@ -289,6 +341,21 @@ namespace
             SceneIPC::InstanceDesc inst{};
             inst.geometryId    = ids[i];
             inst.baseTextureId = kTestTextureId;
+
+            // The last instance is the transparent one, placed clear of the
+            // others so that failing to skip it paints red on empty
+            // background rather than hiding behind something.
+            if (i == 3)
+            {
+                inst.baseTextureId = kClearTextureId;
+                inst.flags |= SceneIPC::kInstanceAlphaBlend;
+                // Left of the mesh and clear of the sprite quads, in the
+                // upper half. The test camera scales world x,y by 0.15, so
+                // this lands at ndc x -0.75..-0.15, y 0.15..0.75.
+                world.m[12] = -5.0f;
+                world.m[13] =  1.0f;
+                inst.clipTransform = Host::Math::Multiply(world, trueVp);
+            }
             inst.clipTransform = Host::Math::Multiply(world, trueVp);
             inst.baseColorFactor[0] = inst.baseColorFactor[1] =
             inst.baseColorFactor[2] = inst.baseColorFactor[3] = 1.0f;
@@ -298,7 +365,7 @@ namespace
 
         SceneIPC::FrameEnd fe{};
         fe.frameIndex    = 1;
-        fe.instanceCount = 3;
+        fe.instanceCount = 4;
         producer.TryWrite(SceneIPC::kMsgFrameEnd, &fe, sizeof(fe), nullptr, 0, true);
 
         Host::SceneReceiver rx;
@@ -338,14 +405,14 @@ namespace
             if (!ok) ++failures;
         };
 
-        check(f.instances.size() == 3,      "3 instances decoded");
-        check(rx.GeometryCount() == 2,      "2 geometries resident");
+        check(f.instances.size() == 4,      "4 instances decoded");
+        check(rx.GeometryCount() == 3,      "3 geometries resident");
         check(st.geometryUnresolved == 0,   "all instances resolved their geometry");
         check(st.transformsRejected == 0,   "all world transforms affine");
-        check(st.persistentBlas == 1,       "only the 4-triangle mesh got its own BLAS");
+        check(st.persistentBlas == 2,       "both 4-triangle meshes got their own BLAS");
         check(st.spriteInstances == 2,      "both quads folded into the sprite batch");
         check(st.spriteTriangles == 4,      "sprite batch holds 4 triangles");
-        check(st.tlasInstances == 2,        "TLAS = 1 mesh + 1 merged sprite instance");
+        check(st.tlasInstances == 3,        "TLAS = 2 meshes + 1 merged sprite instance");
         check(accel.Tlas() != VK_NULL_HANDLE, "TLAS handle created");
         check(st.vpBestScore == st.vpSampleSize,
               "resolver found a VP explaining every instance");
@@ -487,6 +554,16 @@ namespace
                             if (ratio > want * 0.85 && ratio < want * 1.15)
                                 ++textured;
                         }
+
+                    // Nothing may be red: the transparent instance is
+                    // bright red and sits on empty background, so a single
+                    // red pixel means the any-hit shader failed to skip it.
+                    size_t red = 0;
+                    for (size_t i = 0; i < px.size(); i += 3)
+                        if (px[i] > 120 && px[i+1] < 80 && px[i+2] < 80) ++red;
+                    check(red == 0,
+                          "the fully transparent instance was skipped, not "
+                          "drawn");
 
                     check(textured >= 100,
                           "the textured instance sampled its own texture, "

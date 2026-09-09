@@ -603,7 +603,52 @@ stands, roof and floodlights are all visible.
 
 ---
 
-### 6.6 The ray tracing pipeline
+### 6.6 Coplanar layers, and why the pitch was noise
+
+The game builds its pitch from **seven draws that all lie on the same
+plane**: grass, then six blended overlays for markings, wear and shadow,
+all covering the same 6,700 x 4,300 units. A rasteriser composites them in
+draw order. A ray tracer sees seven surfaces at identical depth and takes
+whichever traversal reaches first, which varies per ray — so the pitch came
+out as black and white noise rather than grass.
+
+The answer is in the textures. Alpha, measured across each layer:
+
+| Layer | Texture | Max alpha | Below 0.5 |
+| ----- | ------- | --------- | --------- |
+| grass | 243 | 1.00 | 0% |
+| shadow wash | 1297 | 0.14 | 100% |
+| wear | 184 | 0.25 | 100% |
+| markings | 185 | 0.85 | 97% |
+| markings | 242 | 1.00 | 63% |
+| surround | 9 | 1.00 | 5% |
+| surround | 191 | 1.00 | 20% |
+
+The two layers that contributed pure noise never reach alpha 0.5 anywhere,
+while the grass beneath them is opaque everywhere. So `primary.rahit` tests
+alpha and calls `ignoreIntersectionEXT` below a 0.5 cutoff: the noise layers
+drop out of the tie entirely and the parts genuinely painted on the pitch
+stay.
+
+Three things have to line up for an any-hit shader to run at all, and each
+silently disables it on its own:
+
+- the geometry must not carry `VK_GEOMETRY_OPAQUE_BIT_KHR`;
+- the instance must not carry `FORCE_OPAQUE` — the builder sets
+  `FORCE_NO_OPAQUE` for blended or alpha-tested draws and `FORCE_OPAQUE`
+  for the rest, so the fast path still covers most of the scene;
+- **the ray must not pass `gl_RayFlagsOpaqueEXT`**, which overrides both.
+  That last one is what kept the shader dormant after everything else was
+  right, and it produces no error of any kind.
+
+Shadow rays deliberately run the any-hit too, so the transparent overlays do
+not shadow the grass they lie on. The self-test carries a fully transparent
+bright-red instance on empty background: if the alpha test stops working it
+paints red where nothing should be, and the check fails.
+
+---
+
+### 6.7 The ray tracing pipeline
 
 Four shaders in three groups: raygen, two miss (sky and shadow), one
 closest-hit. Rays are built by unprojecting NDC through the recovered inverse
@@ -649,21 +694,26 @@ Done: the transport, the device, scene reconstruction, acceleration
 structures, and a ray tracing pipeline that traces every live frame. What
 remains is what turns a traced image into a renderer.
 
-1. **Textures.** Albedo is a flat `vec3(0.72)` because nothing is bound into
-   the hit shader yet. This is the largest visual gap by far. The 24-byte
-   pre-lit class also needs its baked vertex colour de-lit into albedo,
-   rather than being used directly and lit twice.
-2. **Normals.** Currently geometric, so everything is faceted. The 32-byte
+1. **Ordered transparency.** Alpha testing removes the coplanar tie but is
+   binary: a surface is either there or absent. The game composites its
+   overlays, so partially transparent markings are currently all-or-nothing.
+   Proper blending needs ordered traversal, and is the next real step.
+2. **Sprites carry no material.** The merged sprite batch bakes triangles
+   from many draws into one structure, which loses their textures and UVs;
+   it renders white. Giving each source draw its own geometry within that
+   BLAS would restore per-sprite materials without going back to one
+   structure per quad.
+3. **Normals.** Currently geometric, so everything is faceted. The 32-byte
    layout carries real per-vertex normals; they have to be carried through
    the scene stream and interpolated in the hit shader.
-3. **Presentation and input.** The host owns the visible window; the game
+4. **Presentation and input.** The host owns the visible window; the game
    window becomes the input sink. The HUD draws are composited on top
    unchanged, per the scope decision to leave the UI alone. Until this
    exists, `--save-every` writing PNGs is the only way to see output.
-4. **Overlap.** Every submit is followed by `vkQueueWaitIdle`, so structure
+5. **Overlap.** Every submit is followed by `vkQueueWaitIdle`, so structure
    builds and traces are fully serialised. Fences would let them overlap.
-5. **Lighting beyond the game's rig.** The captured constants are the seed —
+6. **Lighting beyond the game's rig.** The captured constants are the seed —
    directional `c95`/`c94`, hemisphere `c93`/`c92`/`c91`, specular
    `c63`/`c70` — then physical stadium floodlights and a sky model.
-6. **Path tracing + denoise.** DLSS Ray Reconstruction is already present in
+7. **Path tracing + denoise.** DLSS Ray Reconstruction is already present in
    the game folder, making it the natural denoiser target.

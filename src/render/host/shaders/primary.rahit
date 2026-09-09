@@ -1,0 +1,48 @@
+#version 460
+// glslang only honours #include when this is enabled first.
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+// Alpha testing: deciding whether a surface is there at all.
+//
+// ── Why this exists ──────────────────────────────────────────────────────
+//
+// The game builds its pitch out of seven draws that all lie on the same
+// plane: grass, then six blended overlays for markings, wear and shadow. A
+// rasteriser composites them in draw order. A ray tracer sees seven surfaces
+// at identical depth and picks whichever the traversal reaches first, which
+// varies per ray — so the pitch came out as black and white noise rather than
+// grass.
+//
+// Most of those layers are almost entirely transparent: the two that
+// contributed pure noise have maximum alphas of 0.14 and 0.25 across the
+// whole texture, against 1.0 everywhere for the grass beneath them. Testing
+// alpha and stepping over the transparent parts removes them from the tie
+// entirely, and keeps the parts that are actually painted on the pitch.
+//
+// This runs only for instances the builder marked non-opaque; anything the
+// game drew without blending carries FORCE_OPAQUE and never reaches here.
+
+layout(location = 0) rayPayloadInEXT vec3 hitColor;
+
+hitAttributeEXT vec2 attribs;
+
+void main()
+{
+    const InstanceRecord rec = instances[gl_InstanceCustomIndexEXT];
+
+    // The merged sprite batch has no vertex data of its own — its triangles
+    // were baked into world space from many draws — so there is no UV to
+    // test and it stays opaque.
+    if (rec.vertexAddress == 0ul) return;
+
+    const vec2 uv = HitUv(rec, gl_PrimitiveID, attribs);
+
+    // textureLod for the same reason as in the closest-hit shader: a ray
+    // tracing stage has no derivatives.
+    const float alpha =
+        textureLod(textures[nonuniformEXT(rec.textureSlot)], uv, 0.0).a *
+        rec.baseColor.a;
+
+    if (alpha < kAlphaCutoff) ignoreIntersectionEXT;
+}

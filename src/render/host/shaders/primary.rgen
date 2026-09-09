@@ -27,8 +27,13 @@ void main()
 
     hitColor = vec3(0.0);
 
+    // No gl_RayFlagsOpaqueEXT here. That flag forces every hit to be treated
+    // as opaque, which skips the any-hit shader and with it the alpha test -
+    // and the alpha test is what stops the pitch's blended overlays from
+    // fighting the grass they share a plane with. Opacity is decided per
+    // instance by the builder instead.
     traceRayEXT(topLevel,
-                gl_RayFlagsOpaqueEXT,
+                0,
                 0xFF,          // cull mask
                 0,             // sbtRecordOffset
                 0,             // sbtRecordStride
