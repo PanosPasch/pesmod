@@ -46,6 +46,19 @@ namespace Host
         // x = shadow ray length, y = exposure,
         // z = sky occlusion rays per hit (0 disables), w = their reach
         float params[4];
+
+        // x = AccelBuilder::kDecalBias, y = kResumeFraction. Passed rather
+        // than duplicated in GLSL: the peel's resume epsilon has to stay
+        // inside one decal step, and a second copy of either number is a
+        // silent way for that to stop being true.
+        float decal[4];
+
+        // x selects a debug view, 0 for none. The shading of a pixel is a
+        // product of several terms, and a wrong image says which pixel but
+        // not which term - so each one can be written out on its own.
+        // Reasoning about the alternative, from the recording and the rig on
+        // paper, repeatedly reached the wrong answer.
+        float debug[4];
     };
 
     struct TraceStats

@@ -124,18 +124,17 @@ void SkinVertices(const Geometry& geo, const std::vector<float>& palette,
 
 namespace
 {
-    // Per draw-order step, as a fraction of the distance to the camera.
+    // kDecalBias lives in the header now, because the shaders need it too.
     //
-    // It has to clear the depth resolution of the traversal, which at 5,000
-    // units of float32 is around 3e-4: at 1e-6 a step was 0.005 units, only
-    // sixteen times that, and coplanar layers still tied often enough to
-    // speckle the pitch. At 1e-5 a step is 0.05 units, 150 times the
-    // resolution, and still five parts in a million of a pitch 10,500 units
-    // across. Measured on a recorded frame, the pitch's neighbour-to-
-    // neighbour variation falls from 15.1 at 1e-6 to 8.1 at 1e-5; at 1e-4 it
-    // rises again to 11.6, because by then the decals are far enough off
-    // their base surface to be wrong in a new way.
-    const float kDecalBias = 1.0e-5f;
+    // Its value: a step has to clear the depth resolution of the traversal,
+    // which at 5,000 units of float32 is around 3e-4. At 1e-6 a step was
+    // 0.005 units, only sixteen times that, and coplanar layers still tied
+    // often enough to speckle the pitch. At 1e-5 a step is 0.05 units, 150
+    // times the resolution, and still five parts in a million of a pitch
+    // 10,500 units across. Measured on a recorded frame, the pitch's
+    // neighbour-to-neighbour variation falls from 15.1 at 1e-6 to 8.1 at
+    // 1e-5; at 1e-4 it rises again to 11.6, because by then the decals are
+    // far enough off their base surface to be wrong in a new way.
 
     // Steps are capped so a frame with hundreds of blended draws cannot
     // accumulate a visible displacement. Coplanar decals are consecutive in

@@ -103,6 +103,27 @@ namespace Host
         kMaskShadow  = kMaskSolid
     };
 
+    // ── Coplanar decals ─────────────────────────────────────────────────
+    //
+    // Per draw-order step, as a fraction of the distance to the camera. The
+    // builder nudges each blended instance toward the viewer by this much
+    // times its position in the frame, so the game's draw order becomes
+    // depth order and coplanar layers stop tying.
+    //
+    // This is public, and reaches the shaders through SceneUniforms, because
+    // the ray generation's peel has to resume *inside* one step of it. Those
+    // two numbers were once chosen independently and came out the same
+    // order, which meant a decal's own base surface always fell within the
+    // epsilon that stepped past it: the pitch's grass was skipped and the
+    // pitch rendered as the near-black wear overlay over nothing.
+    const float kDecalBias = 1.0e-5f;
+
+    // How far into one decal step the peel resumes. Comfortably less than a
+    // whole step, so a base surface one step behind its decal is still
+    // ahead of tmin - and still tens of times the float spacing at the
+    // distances this scene uses, so a surface cannot re-hit itself.
+    const float kResumeFraction = 0.25f;
+
     // A draw at or below this many triangles is treated as a sprite and
     // merged rather than given its own acceleration structure. Two triangles
     // covers the quads that dominate the stream; the limit is deliberately

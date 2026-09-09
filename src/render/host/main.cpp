@@ -79,6 +79,9 @@ namespace
             "  --save-every <n>   write every nth traced frame, numbered\n"
             "  --save-path <file> where to write it (default traced_frame.png;\n"
             "                     a .ppm extension writes a PPM instead)\n"
+            "  --debug-view <n>   write one shading term instead of the image:\n"
+            "                     1 instance, 2 albedo, 3 normal,\n"
+            "                     4 sky occlusion, 5 shadow, 6 record flags\n"
             "  --dectest          check the texture decoders (needs no device)\n"
             "  --ao <n>           sky occlusion rays per hit (default 8;\n"
             "                     0 reproduces the game's own flat sky term)\n"
@@ -344,7 +347,48 @@ namespace
             return p[0] == b && p[1] == g && p[2] == r && p[3] == a;
         };
 
-        // ── Sizes ───────────────────────────────────────────────────────────
+        // ── The peel must resume inside one decal step ──────────────────────
+    //
+    // The builder puts a blended decal one step in front of what it
+    // decorates; the ray generation, having composited the decal, resumes
+    // just past it. If that resume reaches a whole step, it lands past the
+    // base surface too and the base is never composited at all.
+    //
+    // That is not a subtle degradation: on the pitch it skipped the grass
+    // and left a near-black wear overlay at 5% alpha over whatever lay
+    // beyond, which rendered as flat blue-grey. It went unnoticed through a
+    // replay because the step a decal lands on depends on how many blended
+    // draws precede it, and letting the game's non-occluding draws into the
+    // scene changed those counts.
+    //
+    // Checked across the distances this game actually uses, and at both
+    // ends of what float32 can resolve there.
+    {
+        const float kStepFloor = 1.0e-4f;      // the shader's absolute floor
+        bool insideAStep = true, clearsPrecision = true;
+        for (double d = 1.0; d <= 40000.0; d *= 1.7)
+        {
+            const double step   = d * Host::kDecalBias;
+            const double resume = (step * Host::kResumeFraction > kStepFloor)
+                                ? step * Host::kResumeFraction : kStepFloor;
+            if (resume >= step && step > kStepFloor) insideAStep = false;
+
+            // And far enough out to not re-hit the same surface: float32
+            // spacing at d is about d * 2^-23.
+            if (resume < d * 1.2e-7) clearsPrecision = false;
+        }
+        check(insideAStep,
+              "the peel resumes inside one decal step, so a decal cannot "
+              "hide the surface it decorates");
+        check(clearsPrecision,
+              "and still clears float32 spacing, so a surface cannot re-hit "
+              "itself");
+        printf("  decal step %.1e of the distance, peel resumes at %.0f%% of "
+               "one step\n",
+               Host::kDecalBias, 100.0 * Host::kResumeFraction);
+    }
+
+    // ── Sizes ───────────────────────────────────────────────────────────
         // A 4x4 DXT1 image is one block of 8 bytes, DXT3 and DXT5 one of 16.
         // A 5x5 needs 2x2 blocks, because a block is 4x4 and does not divide.
         check(Host::TextureSourceMipBytes(SceneIPC::kTexDXT1, 4, 4, 0) == 8,
@@ -1152,6 +1196,8 @@ namespace
             memcpy(u.lightingScale, scl, sizeof(scl));
             u.params[0] = 1000.0f;   // shadow ray length
             u.params[1] = 1.0f;      // exposure
+            u.decal[0]  = Host::kDecalBias;
+            u.decal[1]  = Host::kResumeFraction;
 
             if (!tracer.Trace(accel.Tlas(), u, &textures,
                               &accel.InstanceRecords(),
@@ -1520,6 +1566,8 @@ int main(int argc, char** argv)
     // eight costs 0.6 ms more than four, not double, because stratified rays
     // stay coherent.
     uint32_t    aoSamples = 8;
+    uint32_t    debugView = 0;
+    uint32_t    debugSkip = 0;
     float       aoReach   = 150.0f;   // ~1.5 m, at 100 units to the metre
     std::string shaderDirStorage = ResolveShaderDir();
     const char* shaderDir = shaderDirStorage.c_str();
@@ -1555,6 +1603,10 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--resendtest")) resendTest = true;
         else if (!strcmp(argv[i], "--replaytest")) replayTest = true;
         else if (!strcmp(argv[i], "--dectest")) decodeTest = true;
+        else if (!strcmp(argv[i], "--debug-view") && i + 1 < argc)
+            debugView = (uint32_t)strtoul(argv[++i], nullptr, 10);
+        else if (!strcmp(argv[i], "--debug-skip") && i + 1 < argc)
+            debugSkip = (uint32_t)strtoul(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--record") && i + 1 < argc) recordPath = argv[++i];
         else if (!strcmp(argv[i], "--replay") && i + 1 < argc) replayPath = argv[++i];
         else if (!strcmp(argv[i], "--skip") && i + 1 < argc)
@@ -1816,6 +1868,10 @@ int main(int argc, char** argv)
             u.params[1] = 1.0f;
             u.params[2] = (float)aoSamples;
             u.params[3] = aoReach;
+            u.decal[0]  = Host::kDecalBias;
+            u.decal[1]  = Host::kResumeFraction;
+            u.debug[0]  = (float)debugView;
+            u.debug[1]  = (float)debugSkip;
 
             if (tracer.Trace(accel.Tlas(), u, &textures,
                              &accel.InstanceRecords(),

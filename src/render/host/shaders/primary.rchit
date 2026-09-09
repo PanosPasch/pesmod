@@ -37,6 +37,25 @@ void main()
     // surface reports 1 so the ray generation stops there.
     float surfaceAlpha = 1.0;
 
+    const uint debugView = uint(scene.debug.x + 0.5);
+    if (debugView == kDebugInstance)
+    {
+        payload.colour = IndexColour(uint(gl_InstanceCustomIndexEXT));
+        payload.alpha  = 1.0;
+        payload.dist   = gl_HitTEXT;
+        return;
+    }
+    if (debugView == kDebugFlags)
+    {
+        payload.colour = vec3(
+            ((rec.flags & kRecordBlended)     != 0u) ? 1.0 : 0.0,
+            ((rec.flags & kRecordSpriteBatch) != 0u) ? 1.0 : 0.0,
+            ((rec.flags & kRecordUnlit)       != 0u) ? 1.0 : 0.0);
+        payload.alpha = 1.0;
+        payload.dist  = gl_HitTEXT;
+        return;
+    }
+
     // attribs holds the last two barycentrics; the first is what remains.
     const vec3 bary = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
 
@@ -77,6 +96,14 @@ void main()
         albedo *= sampled.rgb;
         if ((rec.flags & kRecordBlended) != 0u)
             surfaceAlpha = sampled.a * rec.baseColor.a;
+    }
+
+    if (debugView == kDebugAlbedo)
+    {
+        payload.colour = albedo;
+        payload.alpha  = 1.0;
+        payload.dist   = gl_HitTEXT;
+        return;
     }
 
     // ── Unlit surfaces stop here ─────────────────────────────────────────
@@ -151,6 +178,14 @@ void main()
 
     const vec3 hitPos = gl_WorldRayOriginEXT +
                         gl_WorldRayDirectionEXT * gl_HitTEXT;
+
+    if (debugView == kDebugNormal)
+    {
+        payload.colour = worldNormal * 0.5 + 0.5;
+        payload.alpha  = 1.0;
+        payload.dist   = gl_HitTEXT;
+        return;
+    }
 
     // ── Sky occlusion ────────────────────────────────────────────────────
     //
@@ -250,6 +285,16 @@ void main()
                     hitPos + worldNormal * bias, 0.0,
                     L, max(scene.params.x, 1.0),
                     1);         // payload location
+    }
+
+    if (debugView == kDebugSkyVis || debugView == kDebugShadow)
+    {
+        const float v = (debugView == kDebugSkyVis) ? skyVisibility
+                                                    : shadowVisibility;
+        payload.colour = vec3(v);
+        payload.alpha  = 1.0;
+        payload.dist   = gl_HitTEXT;
+        return;
     }
 
     // ── Shading ──────────────────────────────────────────────────────────

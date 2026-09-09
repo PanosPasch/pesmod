@@ -34,6 +34,14 @@ struct SceneUniforms
     // x = shadow ray max distance, y = exposure,
     // z = sky occlusion rays per hit (0 disables), w = their reach
     vec4 params;
+
+    // x = the builder's decal bias per draw-order step, as a fraction of
+    // the distance to the camera; y = how far into one such step the peel
+    // resumes. Both come from the host so there is exactly one definition.
+    vec4 decal;
+
+    // x selects a debug view; see kDebug* below. Zero is the real image.
+    vec4 debug;
 };
 
 // What a hit shader needs to shade a surface it did not know it would hit.
@@ -100,6 +108,31 @@ struct HitPayload
     float alpha;
     float dist;
 };
+
+// ── Debug views ─────────────────────────────────────────────────────────
+//
+// Shading is a product of terms, and a wrong pixel says which pixel but not
+// which term. Each of these writes one term out on its own, straight to the
+// image with no exposure and no gamma, so a pixel can be read off and
+// compared with what it was supposed to be.
+const uint kDebugOff       = 0u;
+const uint kDebugInstance  = 1u;   // a colour per TLAS instance
+const uint kDebugAlbedo    = 2u;   // the texture sample and tint alone
+const uint kDebugNormal    = 3u;   // the shading normal, encoded
+const uint kDebugSkyVis    = 4u;   // traced sky occlusion
+const uint kDebugShadow    = 5u;   // the directional shadow term
+const uint kDebugFlags     = 6u;   // blended / sprite batch / unlit
+const uint kDebugLayers    = 7u;   // how much of the peel a pixel used
+const uint kDebugLeftover  = 8u;   // transmittance the peel had to drop
+
+// Distinct neighbouring colours from consecutive indices: three irrational
+// strides, so adjacent instances never land on adjacent colours.
+vec3 IndexColour(uint i)
+{
+    return vec3(fract(float(i) * 0.6180339887 + 0.15),
+                fract(float(i) * 0.4142135624 + 0.45),
+                fract(float(i) * 0.2360679775 + 0.75));
+}
 
 // How many blended surfaces a single ray will composite before giving up.
 // The pitch is seven coplanar layers, so this has to be comfortably more

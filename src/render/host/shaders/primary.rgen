@@ -25,6 +25,42 @@ void main()
     const vec3 target = UnprojectToWorld(ndc, 1.0);
     const vec3 dir    = normalize(target - origin);
 
+    // ── A debug view short-circuits the whole composite ──────────────────
+    //
+    // One trace, forced opaque so the nearest surface wins outright, and the
+    // hit shader's answer written out raw. Peeling and tonemapping would both
+    // get in the way of reading a value off the image.
+    const uint debugView = uint(scene.debug.x + 0.5);
+    if (debugView != kDebugOff && debugView != kDebugLayers &&
+        debugView != kDebugLeftover)
+    {
+        // debug.y steps past the nearest hits, so a term can be read off a
+        // surface that something else is composited in front of. Forced
+        // opaque, so this walks geometric hits and the any-hit shader cannot
+        // quietly change which surface is being looked at. tmin advances
+        // exactly as the real peel advances it.
+        const int skipHits = int(scene.debug.y + 0.5);
+        float dtmin = 0.0;
+        for (int step = 0; step <= skipHits; ++step)
+        {
+            payload.colour = vec3(0.0);
+            payload.alpha  = 0.0;
+            payload.dist   = -1.0;
+
+            traceRayEXT(topLevel, gl_RayFlagsOpaqueEXT, kMaskPrimary,
+                        0, 0, 0, origin, dtmin, dir, 1.0e9, 0);
+
+            if (payload.dist < 0.0 || step == skipHits) break;
+            dtmin = payload.dist +
+                    max(payload.dist * scene.decal.x * scene.decal.y, 1.0e-4);
+        }
+
+        // A miss stays black, so background and geometry cannot be confused.
+        const vec3 shown = (payload.dist < 0.0) ? vec3(0.0) : payload.colour;
+        imageStore(outputImage, ivec2(gl_LaunchIDEXT.xy), vec4(shown, 1.0));
+        return;
+    }
+
     // ── Peel the transparent layers, front to back ───────────────────────
     // See HitPayload in common.glsl for why this is a loop rather than one
     // trace: the game composites blended surfaces in draw order and shading
@@ -34,8 +70,16 @@ void main()
     float transmittance = 1.0;
     float tmin = 0.0;
 
+    // How many layers this pixel actually consumed, which is the one thing
+    // about the composite that the finished image cannot show. A pixel that
+    // runs the loop out has its remaining transmittance dropped, and comes
+    // out dark for a reason no single surface explains.
+    int layersUsed = 0;
+    bool ranOut = true;
+
     for (int layer = 0; layer < kMaxLayers; ++layer)
     {
+        ++layersUsed;
         payload.colour = vec3(0.0);
         payload.alpha  = 0.0;
         payload.dist   = -1.0;
@@ -55,6 +99,7 @@ void main()
 
         if (payload.dist < 0.0)
         {
+            ranOut = false;
             // ── The background ───────────────────────────────────────────
             //
             // The game's sky is a textured box around the camera, drawn with
@@ -88,12 +133,44 @@ void main()
         transmittance *= (1.0 - a);
 
         // Nothing behind this can still be seen.
-        if (transmittance < 1.0 / 255.0) break;
+        if (transmittance < 1.0 / 255.0) { ranOut = false; break; }
 
-        // Resume just past the hit. The offset scales with distance because
-        // floating-point precision does: a fixed epsilon either re-hits the
-        // same surface far away or skips past a near one.
-        tmin = payload.dist * (1.0 + 1.0e-5) + 1.0e-3;
+        // ── Resume just past the hit ─────────────────────────────────────
+        //
+        // Scaled by distance, because floating-point precision is: a fixed
+        // epsilon either re-hits the same surface far away or steps past a
+        // near one.
+        //
+        // And strictly inside one decal step, which is the part that was
+        // wrong. The builder places a decal one step in front of what it
+        // decorates; an epsilon of a whole step therefore landed past the
+        // base surface every time, and the base was never composited. On the
+        // pitch that meant the grass was skipped and what remained was a
+        // near-black wear overlay at 5% alpha over whatever lay beyond -
+        // which read as a flat blue-grey where the grass should be.
+        //
+        // The floor keeps it non-zero for a hit at the origin.
+        const float step = payload.dist * scene.decal.x;
+        tmin = payload.dist + max(step * scene.decal.y, 1.0e-4);
+    }
+
+    if (debugView == kDebugLayers || debugView == kDebugLeftover)
+    {
+        // Layers as a ramp from green to red, with a pixel that exhausted
+        // the loop flagged blue so it cannot be mistaken for one that merely
+        // used a lot; leftover transmittance as plain grey.
+        vec3 shown;
+        if (debugView == kDebugLayers)
+        {
+            const float f = float(layersUsed) / float(kMaxLayers);
+            shown = ranOut ? vec3(f, 0.0, 1.0) : vec3(f, 1.0 - f, 0.0);
+        }
+        else
+        {
+            shown = vec3(transmittance);
+        }
+        imageStore(outputImage, ivec2(gl_LaunchIDEXT.xy), vec4(shown, 1.0));
+        return;
     }
 
     const float exposure = max(scene.params.y, 1e-3);

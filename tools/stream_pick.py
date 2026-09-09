@@ -88,7 +88,11 @@ CAM = np.linalg.solve(A, -np.array([VP[3,0], VP[3,1], VP[3,3]]))
 # The renderer nudges blended instances toward the viewer by draw order so
 # coplanar decals have a defined order. Without reproducing that here the
 # picker reports a different frontmost surface than the renderer draws.
-DECAL_BIAS, MAX_STEPS = 1.0e-5, 128
+# Must match AccelBuilder::kDecalBias / kResumeFraction, which the host
+# passes to the shaders in SceneUniforms::decal. RESUME_FRACTION is what
+# keeps the peel from stepping past the surface a decal decorates: a
+# whole step landed beyond it and the base was never composited.
+DECAL_BIAS, MAX_STEPS, RESUME_FRACTION = 1.0e-5, 128, 0.25
 
 # The renderer's ray generation, verbatim.
 ndc = np.array([(PX + 0.5)/W*2.0 - 1.0, 1.0 - (PY_ + 0.5)/H*2.0])
@@ -120,6 +124,21 @@ def skinned_positions(d, vbytes, pal, scale):
             out[v] += w[v]*np.array([p4@m[0], p4@m[1], p4@m[2]])
     return out
 
+def encloses_camera(g, clip):
+    """Whether this draw's world bounds contain the eye - the builder's test
+    for the sky, which is the one non-occluding draw kept out of the TLAS."""
+    d, vbytes, _ib = g
+    n, st = d['vcount'], d['stride']
+    if n == 0 or st < 12:
+        return False
+    P = np.frombuffer(vbytes, dtype='<f4', count=n*st//4)
+    P = np.lib.stride_tricks.as_strided(P, shape=(n, 3),
+                                        strides=(st, 4)).astype(np.float64)
+    wp = (np.hstack([P, np.ones((len(P), 1))]) @ (clip @ invVP))[:, :3]
+    lo, hi = wp.min(0), wp.max(0)
+    return bool(np.all(CAM >= lo - 1.0) and np.all(CAM <= hi + 1.0))
+
+
 def tri_indices(d, ib):
     if d['icount']:
         dt = '<u4' if d['istride']==4 else '<u2'
@@ -128,9 +147,18 @@ def tri_indices(d, ib):
 
 hits = []       # every surface the ray crosses, not just the first
 decalOrder = 0
+skipped_sky = 0
 for n, (gid, texid, clip, flags, pal, scale) in enumerate(instances):
-    if flags & 0x40:            # kInstanceNoDepthWrite: not in the TLAS
-        continue
+    # kInstanceNoDepthWrite no longer means "dropped". The builder puts these
+    # in the TLAS on kMaskNonOccluding, where a primary ray sees them and a
+    # shadow ray does not - only the sky, identified by its bounds containing
+    # the camera, stays out. Skipping them here made this tool disagree with
+    # the renderer about exactly the draws that were newly let in.
+    if flags & 0x40:
+        g0 = geo.get(gid)
+        if g0 and encloses_camera(g0, clip):
+            skipped_sky += 1
+            continue
     g = geo.get(gid)
     if not g: continue
     d, vbytes, ib = g
@@ -195,6 +223,59 @@ for h in hits[:10]:
     t, n, gid, texid, flags, d, ntri, alpha = h
     print('%-10.1f %-6d %-7d 0x%-6X %-7d %-7d %016X' %
           (t, n, texid, flags, alpha, ntri, gid))
+
+# ── What the ray generation would composite ─────────────────────────────
+#
+# Listing the surfaces is not the same as saying what comes out: the peeling
+# loop walks them front to back with a running transmittance and gives up
+# after kMaxLayers, dropping whatever is left. A pixel whose base surface
+# sits past that limit renders dark for a reason no single hit explains,
+# which is why this is spelled out rather than left to be inferred.
+K_MAX_LAYERS = 12
+print()
+print('the peeling loop, front to back (kMaxLayers = %d):' % K_MAX_LAYERS)
+transmittance = 1.0
+consumed = 0
+resume = 0.0
+for layer, h in enumerate(hits):
+    # Skipped for the same reason the renderer would skip it: the previous
+    # layer pushed tmin past this one.
+    if h[0] < resume:
+        print('  layer %-2d inst %-4d tex %-6d at t=%.4f is INSIDE the resume '
+              'epsilon (%.4f) and is stepped over'
+              % (layer, h[1], h[3], h[0], resume))
+        continue
+    resume = h[0] + max(h[0] * DECAL_BIAS * RESUME_FRACTION, 1.0e-4)
+    if layer >= K_MAX_LAYERS:
+        print('  ... %d more surface(s) never reached; %.3f of the ray is '
+              'still unaccounted for and is dropped'
+              % (len(hits) - K_MAX_LAYERS, transmittance))
+        break
+    t, n, gid, texid, flags, d, ntri, alpha = h
+    # The any-hit shader steps over a texel with no coverage at all.
+    if alpha < 1:
+        print('  layer %-2d skipped by the alpha test (inst %d, tex %d)'
+              % (layer, n, texid))
+        continue
+    a = alpha / 255.0
+    print('  layer %-2d inst %-4d tex %-6d alpha %.3f  contributes %.3f, '
+          'transmittance %.3f -> %.3f'
+          % (consumed, n, texid, a, transmittance * a,
+             transmittance, transmittance * (1.0 - a)))
+    transmittance *= (1.0 - a)
+    consumed += 1
+    if transmittance < 1.0 / 255.0:
+        print('  opaque by layer %d; nothing behind it is visible' % consumed)
+        break
+else:
+    if transmittance >= 1.0 / 255.0:
+        print('  ran out of surfaces with %.3f transmittance left, so the '
+              'background shows through' % transmittance)
+
+if skipped_sky:
+    print()
+    print('(%d draw(s) kept out as sky: their bounds contain the camera)'
+          % skipped_sky)
 
 best = hits[0] if hits else None
 
