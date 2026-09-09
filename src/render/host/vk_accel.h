@@ -62,6 +62,7 @@ namespace Host
         uint32_t vpSampleSize;
         const char* vpSource;           // where the winning VP came from
         uint32_t geometryUnresolved;    // instance referenced missing geometry
+        uint32_t nonOccluding;          // skipped: drawn with depth writes off
         uint64_t blasBytes;
         uint64_t scratchBytes;
         double   buildMilliseconds;

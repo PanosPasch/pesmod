@@ -182,7 +182,22 @@ namespace SceneIPC
         kInstanceTwoSided     = 1u << 2,
         kInstancePreLit       = 1u << 3,   // bake vertex colour, do not relight
         kInstanceNoShadow     = 1u << 4,
-        kInstanceWorldValid   = 1u << 5    // worldTransform is filled in
+        kInstanceWorldValid   = 1u << 5,   // worldTransform is filled in
+
+        // Drawn with D3DRS_ZWRITEENABLE off — the game's own statement that
+        // this geometry must not occlude anything.
+        //
+        // A rasteriser honours that by draw order and depth writes. A ray
+        // tracer has no equivalent: whatever is nearest along the ray wins.
+        // In this game that difference is the whole image, because the sky is
+        // a small dome ~75 units from the camera while the stadium is
+        // thousands away, so every primary ray hits the sky first and the
+        // frame comes out a flat wall.
+        //
+        // On a measured match frame this covers 37 of 405 world draws and 242
+        // of 21,441 triangles: the sky dome plus two-triangle overlay
+        // sprites. Nothing that should be traced.
+        kInstanceNoDepthWrite = 1u << 6
     };
 
     // The game's own lighting rig, read from vertex shader constants rather

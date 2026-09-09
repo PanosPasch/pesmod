@@ -444,10 +444,10 @@ namespace
     void ReportAccel(const Host::AccelStats& st)
     {
         printf("    AS: %u BLAS (%u rebuilt) | %u sprites -> %u tris merged | "
-               "TLAS %u inst | rejected %u | %.2f ms\n",
+               "TLAS %u inst | rejected %u | sky/overlay %u | %.2f ms\n",
                st.persistentBlas, st.blasBuiltThisFrame,
                st.spriteInstances, st.spriteTriangles,
-               st.tlasInstances, st.transformsRejected,
+               st.tlasInstances, st.transformsRejected, st.nonOccluding,
                st.buildMilliseconds);
     }
 

@@ -570,7 +570,40 @@ that *is* the VP). The winner must explain at least half the sampled
 instances. Only the affinity check made the original failure visible at all,
 which is the argument for keeping checks on things that "cannot" go wrong.
 
-### 6.5 The ray tracing pipeline
+### 6.5 What is scene geometry, and what only looks like it
+
+A draw list is not a scene. Two kinds of draw have to be removed before the
+geometry means anything to a ray tracer.
+
+**Topology.** An acceleration structure has one triangle topology: a list.
+Direct3D 8 has three, and this game overwhelmingly uses the one that is not
+a list — 403 of a match frame's 405 world draws are strips. Handing a
+strip's indices to a consumer that groups them in threes builds triangles
+from vertices that were never adjacent: a 513-triangle strip becomes 171
+arbitrary ones spanning the whole mesh. That produced the long slivers that
+fanned across the frame once the camera was right. The producer now expands
+strips and fans itself, drops the degenerate triangles strips use to stitch
+runs together (13,357 of 21,441 in that frame), and rebases indices onto the
+vertex slice it actually sent — the two numbers only it knows.
+
+**Geometry that must not occlude.** The sky is a dome about 75 units from
+the camera; the stadium is thousands of units away. A rasteriser handles
+that with draw order and `D3DRS_ZWRITEENABLE = FALSE`, so the sky never
+writes depth and never occludes. A ray tracer has no equivalent — whatever
+is nearest along the ray wins — so every primary ray hits the sky first and
+the frame is a flat wall.
+
+`ZWRITEENABLE` turns out to be exactly the right discriminator, because it
+is the game stating the property we need. On a measured match frame it
+selects 37 of 405 world draws and 242 of 21,441 triangles: the sky dome and
+a set of two-triangle overlay sprites, and nothing else. Those instances
+carry `kInstanceNoDepthWrite` and the builder leaves them out of the TLAS.
+Before that rule the sky owned 98.5% of the frame; after it, the pitch,
+stands, roof and floodlights are all visible.
+
+---
+
+### 6.6 The ray tracing pipeline
 
 Four shaders in three groups: raygen, two miss (sky and shadow), one
 closest-hit. Rays are built by unprojecting NDC through the recovered inverse

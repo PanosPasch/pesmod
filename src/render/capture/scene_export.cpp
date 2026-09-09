@@ -84,6 +84,12 @@ namespace
     uint64_t g_insaneClipTransforms = 0;
     bool     g_warnedInsaneClip     = false;
 
+    // Triangles dropped because an index pointed outside the vertex
+    // slice that was sent. Should be zero: minIndex/numVertices define
+    // the slice precisely. Counted rather than assumed.
+    uint64_t g_indicesOutOfSlice = 0;
+    bool     g_warnedOutOfSlice  = false;
+
     // ── Geometry id churn diagnostic ─────────────────────────────────────
     // The host's geometry cache was observed growing without bound (~8-15 new
     // ids per frame forever) while the instance count stayed flat, which means
@@ -313,6 +319,138 @@ namespace
         memcpy(out.m, &src._11, sizeof(float) * 16);
     }
 
+    // ── Topology ─────────────────────────────────────────────────────────
+    //
+    // An acceleration structure has exactly one triangle topology: a list.
+    // Direct3D 8 has three, and this game overwhelmingly uses the one that is
+    // not a list — 403 of a match frame's 405 world draws are strips.
+    //
+    // Sending a strip's indices verbatim and letting the consumer group them
+    // in threes builds triangles out of vertices that were never adjacent:
+    // a 513-triangle strip becomes 171 arbitrary ones spanning the whole
+    // mesh. That is what produced the long slivers fanning across the first
+    // traced frames.
+    //
+    // Indices are also rebased here. Only the slice a draw touches is sent
+    // (`firstVertex` onwards), while the index buffer holds absolute indices,
+    // so they have to be moved into the slice's numbering by the side that
+    // knows both numbers — this one.
+    struct TriangleListBuilder
+    {
+        std::vector<uint8_t>& out;
+        uint32_t              firstVertex;
+        uint32_t              vertexCount;
+        uint32_t              stride;       // 2 or 4, chosen for the slice
+        uint32_t              emitted;
+        uint32_t              rejected;     // out of slice, counted not hidden
+
+        TriangleListBuilder(std::vector<uint8_t>& dst, uint32_t first,
+                            uint32_t count)
+            : out(dst), firstVertex(first), vertexCount(count)
+            , stride(count > 0xFFFFu ? 4u : 2u), emitted(0), rejected(0)
+        {
+            out.clear();
+        }
+
+        void Add(uint32_t a, uint32_t b, uint32_t c)
+        {
+            // Strips stitch separate runs together with degenerate triangles.
+            // They contribute nothing and would only bloat the structure.
+            if (a == b || b == c || a == c) return;
+
+            if (a < firstVertex || b < firstVertex || c < firstVertex)
+            {
+                ++rejected;
+                return;
+            }
+            a -= firstVertex; b -= firstVertex; c -= firstVertex;
+            if (a >= vertexCount || b >= vertexCount || c >= vertexCount)
+            {
+                ++rejected;
+                return;
+            }
+
+            const uint32_t tri[3] = { a, b, c };
+            const size_t at = out.size();
+            out.resize(at + 3 * stride);
+            for (int i = 0; i < 3; ++i)
+            {
+                if (stride == 2)
+                {
+                    uint16_t v = (uint16_t)tri[i];
+                    memcpy(&out[at + i * 2], &v, 2);
+                }
+                else
+                {
+                    memcpy(&out[at + i * 4], &tri[i], 4);
+                }
+            }
+            ++emitted;
+        }
+    };
+
+    // Reads index `i` of the draw, in the index buffer's own numbering.
+    inline uint32_t IndexAt(const uint8_t* raw, uint32_t rawStride, uint32_t i)
+    {
+        if (rawStride == 4)
+        {
+            uint32_t v; memcpy(&v, raw + i * 4, 4); return v;
+        }
+        uint16_t v; memcpy(&v, raw + i * 2, 2); return v;
+    }
+
+    // Expands a draw into a rebased triangle list. `raw` may be null for a
+    // non-indexed draw, whose vertices were read consecutively from
+    // `startVertex` and so are already in order.
+    // The builder already knows the slice, so it is not repeated here.
+    void BuildTriangleList(const DrawCallInfo& info, const uint8_t* raw,
+                           uint32_t rawStride, uint32_t baseVertexIndex,
+                           TriangleListBuilder& b)
+    {
+        const uint32_t verts =
+            D3D8Util::PrimitiveVertexCount(info.primitiveType,
+                                           info.primitiveCount);
+        if (verts < 3) return;
+
+        // One accessor for both cases keeps the topology logic single-copy.
+        // A non-indexed draw's nth vertex is startVertex + n; an indexed
+        // draw's is baseVertexIndex + the index buffer's nth entry.
+        struct Fetch
+        {
+            const uint8_t* raw; uint32_t rawStride, base;
+            uint32_t operator()(uint32_t n) const
+            {
+                return raw ? base + IndexAt(raw, rawStride, n) : base + n;
+            }
+        } at = { raw, rawStride, raw ? baseVertexIndex : info.startVertex };
+
+        switch (info.primitiveType)
+        {
+        case D3DPT_TRIANGLELIST:
+            for (uint32_t t = 0; t < info.primitiveCount; ++t)
+                b.Add(at(t * 3), at(t * 3 + 1), at(t * 3 + 2));
+            break;
+
+        case D3DPT_TRIANGLESTRIP:
+            // Winding alternates. Ray tracing only cares when culling is on,
+            // but preserving it costs nothing and keeps that option open.
+            for (uint32_t t = 0; t < info.primitiveCount; ++t)
+            {
+                if (t & 1) b.Add(at(t + 1), at(t), at(t + 2));
+                else       b.Add(at(t),     at(t + 1), at(t + 2));
+            }
+            break;
+
+        case D3DPT_TRIANGLEFAN:
+            for (uint32_t t = 0; t < info.primitiveCount; ++t)
+                b.Add(at(0), at(t + 1), at(t + 2));
+            break;
+
+        default:
+            break;   // points and lines are not surfaces; nothing to trace
+        }
+    }
+
     // ── Buffer readback ──────────────────────────────────────────────────
     bool ReadVertexRange(IDirect3DVertexBuffer8* vb, uint32_t byteOffset,
                          uint32_t byteCount, std::vector<uint8_t>& out)
@@ -536,6 +674,17 @@ void EndFrame()
             "the screen centre.",
             (unsigned long long)g_insaneClipTransforms);
     }
+
+    if (g_indicesOutOfSlice && !g_warnedOutOfSlice)
+    {
+        g_warnedOutOfSlice = true;
+        Logger::Log("[Export] %llu triangles dropped for referencing vertices "
+            "outside the slice that was sent. minIndex/numVertices are "
+            "supposed to bound exactly what a draw touches, so this means "
+            "either the game lied about them or the slice is being computed "
+            "wrongly.",
+            (unsigned long long)g_indicesOutOfSlice);
+    }
 }
 
 void UpdateLighting(const DeviceState& state)
@@ -614,25 +763,39 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
         return;
     }
 
-    uint32_t indexStride = 2, indexCount = 0;
-    g_indexScratch.clear();
+    // Read the draw's own indices, then expand whatever topology it used
+    // into the triangle list an acceleration structure requires. Every draw
+    // ends up indexed, including the non-indexed ones: it costs a little
+    // bandwidth and leaves the consumer with exactly one case to handle.
+    std::vector<uint8_t> rawIndices;
+    uint32_t rawStride = 2;
     if (info.indexed)
     {
-        indexCount = D3D8Util::PrimitiveVertexCount(info.primitiveType,
-                                                    info.primitiveCount);
+        const uint32_t rawCount =
+            D3D8Util::PrimitiveVertexCount(info.primitiveType,
+                                           info.primitiveCount);
         D3DINDEXBUFFER_DESC ibDesc;
         if (SUCCEEDED(((IDirect3DIndexBuffer8*)state.indexBuffer)->GetDesc(&ibDesc)))
-            indexStride = (ibDesc.Format == D3DFMT_INDEX32) ? 4u : 2u;
+            rawStride = (ibDesc.Format == D3DFMT_INDEX32) ? 4u : 2u;
 
         if (!ReadIndexRange((IDirect3DIndexBuffer8*)state.indexBuffer,
-                            info.startIndex * indexStride,
-                            indexCount * indexStride,
-                            g_indexScratch, indexStride))
+                            info.startIndex * rawStride,
+                            rawCount * rawStride, rawIndices, rawStride))
         {
             ++g_stats.drawsSkipped;
             return;
         }
     }
+
+    TriangleListBuilder builder(g_indexScratch, firstVertex, vertexCount);
+    BuildTriangleList(info, info.indexed ? rawIndices.data() : nullptr,
+                      rawStride, state.baseVertexIndex, builder);
+
+    if (builder.emitted == 0) { ++g_stats.drawsSkipped; return; }
+    g_indicesOutOfSlice += builder.rejected;
+
+    const uint32_t indexStride = builder.stride;
+    const uint32_t indexCount  = builder.emitted * 3;
 
     // ── Upload the slice if it is new or has changed ─────────────────────
     // Hashing the vertex range every frame is what catches re-skinned
@@ -730,6 +893,7 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
     memcpy(inst.baseColorFactor, state.vsConstants[72], sizeof(float) * 4);
 
     if (state.renderState[D3DRS_ALPHABLENDENABLE]) inst.flags |= kInstanceAlphaBlend;
+    if (!state.renderState[D3DRS_ZWRITEENABLE])    inst.flags |= kInstanceNoDepthWrite;
     if (state.renderState[D3DRS_ALPHATESTENABLE])  inst.flags |= kInstanceAlphaTest;
     if (state.renderState[D3DRS_CULLMODE] == 1)    inst.flags |= kInstanceTwoSided;
     if (kind == kVertexPreLit)                     inst.flags |= kInstancePreLit;

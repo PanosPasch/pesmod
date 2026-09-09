@@ -654,6 +654,12 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene)
     {
         const InstanceDesc& inst = frame.instances[i];
 
+        // Geometry the game refuses to let occlude anything must not go into
+        // the TLAS, because a ray tracer would let it occlude everything.
+        // The sky is a small dome around the camera; the stadium is thousands
+        // of units away. See kInstanceNoDepthWrite.
+        if (inst.flags & kInstanceNoDepthWrite) { ++m_stats.nonOccluding; continue; }
+
         const Geometry* geo = scene.FindGeometry(inst.geometryId);
         if (!geo) { ++m_stats.geometryUnresolved; continue; }
 
