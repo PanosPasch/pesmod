@@ -165,7 +165,8 @@ namespace
 AccelBuilder::AccelBuilder()
     : m_device(nullptr), m_alloc(nullptr), m_commandPool(VK_NULL_HANDLE)
     , m_spriteCapacityBytes(0), m_tlasCapacityBytes(0)
-    , m_instanceRecordCapacity(0), m_instanceRecordCount(0), m_scratchCapacity(0)
+    , m_instanceRecordCapacity(0), m_instanceRecordCount(0)
+    , m_spriteTriangleCapacity(0), m_spriteTriangleCount(0), m_scratchCapacity(0)
     , m_haveVpHint(false), m_haveCameraPos(false), m_frameCounter(0)
 {
     memset(&m_stats, 0, sizeof(m_stats));
@@ -227,6 +228,7 @@ void AccelBuilder::Shutdown()
     if (m_tlasInstances.IsValid())  m_alloc->DestroyBuffer(m_tlasInstances);
     if (m_scratch.IsValid())        m_alloc->DestroyBuffer(m_scratch);
     if (m_instanceRecords.IsValid()) m_alloc->DestroyBuffer(m_instanceRecords);
+    if (m_spriteTriangles.IsValid()) m_alloc->DestroyBuffer(m_spriteTriangles);
 
     if (m_commandPool != VK_NULL_HANDLE)
     {
@@ -445,7 +447,12 @@ bool AccelBuilder::PrepareSpriteBlas(const std::vector<float>& positions,
     job.geometry.sType              = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
     job.geometry.geometryType       = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
     job.geometry.geometry.triangles = tri;
-    job.geometry.flags              = VK_GEOMETRY_OPAQUE_BIT_KHR;
+
+    // Not opaque any more. The batch carries a per-triangle material now,
+    // and some of those materials are mostly empty - the projected shadows
+    // are a blob in a 128x128 texture whose mean alpha is a tenth - so the
+    // any-hit shader has to get a chance to step over the empty parts.
+    job.geometry.flags              = 0;
 
     job.build.sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     job.build.type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
@@ -857,7 +864,10 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
 
     // Sprite triangles are expanded to world space here and merged into one
     // structure; see the header for why they do not get individual BLASes.
-    std::vector<float> spritePositions;
+    // The parallel table carries the material the merge would otherwise
+    // throw away, one entry per triangle.
+    std::vector<float>          spritePositions;
+    std::vector<SpriteTriangle> spriteTris;
 
     // One record per TLAS instance, in the same order, so
     // gl_InstanceCustomIndexEXT indexes straight into it.
@@ -907,6 +917,20 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
             const uint8_t* vb = geo->vertices.data();
             const uint32_t stride = geo->desc.vertexStride;
             const uint32_t indexCount = geo->desc.indexCount;
+            const uint32_t uvOffset = geo->desc.uvOffset;
+
+            // The material this draw would have had if it kept its own
+            // structure. Every sprite in the stream is textured - the
+            // hoardings, the stand panels, the projected shadows - so
+            // dropping this is what left the batch rendering white.
+            SpriteTriangle mat;
+            memset(&mat, 0, sizeof(mat));
+            mat.textureSlot  = textures ? textures->Slot(inst.baseTextureId)
+                                        : kWhiteTextureSlot;
+            mat.samplerIndex = SamplerIndexForAddress(inst.textureAddress);
+            mat.flags = (inst.flags & (kInstanceAlphaBlend | kInstanceAlphaTest))
+                      ? kRecordBlended : 0u;
+            memcpy(mat.baseColor, inst.baseColorFactor, sizeof(mat.baseColor));
 
             for (uint32_t t = 0; t < triangles * 3; ++t)
             {
@@ -918,18 +942,40 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
                     else
                         vertexIndex = ((const uint32_t*)geo->indices.data())[t];
                 }
-                // The index came from another process; a bad one must not
-                // become an out-of-bounds read.
-                if ((uint64_t)vertexIndex * stride + 12 > geo->vertices.size())
-                    continue;
 
-                const float* p = (const float*)(vb + (size_t)vertexIndex * stride);
-                const float x = p[0], y = p[1], z = p[2];
+                // The index came from another process; a bad one must not
+                // become an out-of-bounds read. A bad vertex is emitted
+                // degenerate rather than skipped: dropping one would shift
+                // every later triangle by a vertex, and now that
+                // gl_PrimitiveID indexes the material table that would
+                // mis-texture the rest of the batch rather than merely
+                // deform one sprite.
+                float x = 0.0f, y = 0.0f, z = 0.0f, u = 0.0f, v = 0.0f;
+                if ((uint64_t)vertexIndex * stride + 12 <= geo->vertices.size())
+                {
+                    const float* p = (const float*)(vb + (size_t)vertexIndex * stride);
+                    x = p[0]; y = p[1]; z = p[2];
+
+                    if (uvOffset != SceneIPC::kNoVertexAttribute &&
+                        (uint64_t)vertexIndex * stride + uvOffset + 8 <=
+                            geo->vertices.size())
+                    {
+                        const float* uvp = (const float*)
+                            (vb + (size_t)vertexIndex * stride + uvOffset);
+                        u = uvp[0]; v = uvp[1];
+                    }
+                }
 
                 // Row-vector transform, matching the game's convention.
                 spritePositions.push_back(x*world.m[0] + y*world.m[4] + z*world.m[8]  + world.m[12]);
                 spritePositions.push_back(x*world.m[1] + y*world.m[5] + z*world.m[9]  + world.m[13]);
                 spritePositions.push_back(x*world.m[2] + y*world.m[6] + z*world.m[10] + world.m[14]);
+
+                // Every third vertex opens a new triangle and its entry.
+                const uint32_t corner = t % 3u;
+                if (corner == 0u) spriteTris.push_back(mat);
+                spriteTris.back().uv[corner * 2u]      = u;
+                spriteTris.back().uv[corner * 2u + 1u] = v;
             }
             ++m_stats.spriteInstances;
             continue;
@@ -1080,15 +1126,16 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
     }
     if (haveSprites && m_spriteBlas.handle != VK_NULL_HANDLE)
     {
-        // The merged sprite BLAS has no per-sprite identity left: its
-        // triangles came from many draws and were baked into world space
-        // together. One record covers the batch, untextured, until sprites
-        // carry their own UVs and materials through the merge.
+        // The merged sprite BLAS has no per-sprite identity of its own:
+        // its triangles came from many draws and were baked into world
+        // space together. The record says so, and the hit shaders read the
+        // material out of the SpriteTriangle table by gl_PrimitiveID
+        // instead of out of the record.
         InstanceRecord rec;
         memset(&rec, 0, sizeof(rec));
         rec.textureSlot  = kWhiteTextureSlot;
         rec.samplerIndex = 0;
-        rec.flags        = 0;    // the merged sprite batch is opaque
+        rec.flags        = kRecordSpriteBatch;
         rec.baseColor[0] = rec.baseColor[1] = rec.baseColor[2] = rec.baseColor[3] = 1.0f;
 
         VkAccelerationStructureInstanceKHR out{};
@@ -1096,12 +1143,33 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
         out.instanceCustomIndex = (uint32_t)records.size() & 0xFFFFFF;
         records.push_back(rec);
         out.mask  = 0xFF;
-        // Forced opaque: the merged batch has no UVs, so there is nothing to
-        // alpha test against.
-        out.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR |
-                    VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
+        // Deliberately not FORCE_OPAQUE: the batch has UVs now, and the
+        // shadows and netting among it are mostly empty texture.
+        out.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
         out.accelerationStructureReference = m_spriteBlas.address;
         tlasInstances.push_back(out);
+    }
+
+    // The sprite material table goes up with the records, and for the same
+    // reason: it describes the batch that is about to be built.
+    m_spriteTriangleCount = haveSprites ? (uint32_t)spriteTris.size() : 0u;
+    if (m_spriteTriangleCount)
+    {
+        const VkDeviceSize bytes = spriteTris.size() * sizeof(SpriteTriangle);
+        if (!m_spriteTriangles.IsValid() || m_spriteTriangleCapacity < bytes)
+        {
+            if (m_spriteTriangles.IsValid())
+                m_alloc->DestroyBuffer(m_spriteTriangles);
+
+            const VkDeviceSize capacity = bytes + bytes / 2 + 4096;
+            if (m_alloc->CreateBuffer(capacity, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                      true, m_spriteTriangles))
+                m_spriteTriangleCapacity = capacity;
+            else
+                m_spriteTriangleCount = 0;
+        }
+        if (m_spriteTriangleCount)
+            memcpy(m_spriteTriangles.mapped, spriteTris.data(), (size_t)bytes);
     }
 
     // Records go up before the submit, so they describe the same frame the

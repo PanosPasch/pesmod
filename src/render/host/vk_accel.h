@@ -59,7 +59,12 @@ namespace Host
     {
         // The surface composites over what is behind it rather than replacing
         // it, so the ray has to continue past it and its alpha is meaningful.
-        kRecordBlended = 1u << 0
+        kRecordBlended = 1u << 0,
+
+        // This record covers the merged sprite batch, whose triangles
+        // came from many draws. Its material is per triangle, in the
+        // SpriteTriangle table, not in the record.
+        kRecordSpriteBatch = 1u << 1
     };
 
     // A draw at or below this many triangles is treated as a sprite and
@@ -132,6 +137,11 @@ namespace Host
         const GpuBuffer& InstanceRecords() const { return m_instanceRecords; }
         uint32_t InstanceRecordCount() const { return m_instanceRecordCount; }
 
+        // One entry per triangle of the merged sprite batch, in the same
+        // order the triangles were merged, so gl_PrimitiveID indexes it.
+        const GpuBuffer& SpriteTriangles() const { return m_spriteTriangles; }
+        uint32_t SpriteTriangleCount() const { return m_spriteTriangleCount; }
+
         // Drops persistent structures whose geometry is no longer resident.
         void PruneOrphans(const SceneReceiver& scene);
 
@@ -177,6 +187,37 @@ namespace Host
                       "InstanceRecord must match shaders/common.glsl");
         static_assert(offsetof(InstanceRecord, flags)        == 52,
                       "InstanceRecord must match shaders/common.glsl");
+
+        // ── Materials for the merged sprite batch ────────────────────
+        //
+        // A sprite draw is two triangles, and the scene has around a
+        // hundred of them a frame: advertising hoardings, stand panels,
+        // projected shadows. Giving each its own structure costs far
+        // more than tracing it, so they are baked into world space and
+        // merged - which throws away the one thing a rasteriser gets for
+        // free, namely which draw a triangle came from.
+        //
+        // This is that identity, put back. The merged batch is
+        // non-indexed, three vertices per triangle, so gl_PrimitiveID
+        // indexes this table directly and no indirection is needed.
+        struct SpriteTriangle
+        {
+            float    uv[6];         // uv0.xy, uv1.xy, uv2.xy
+            uint32_t textureSlot;
+            uint32_t samplerIndex;
+            float    baseColor[4];
+            uint32_t flags;         // kRecordBlended
+            uint32_t _pad0, _pad1, _pad2;
+        };
+
+        static_assert(sizeof(SpriteTriangle) == 64,
+                      "SpriteTriangle must match shaders/common.glsl");
+        static_assert(offsetof(SpriteTriangle, textureSlot)  == 24,
+                      "SpriteTriangle must match shaders/common.glsl");
+        static_assert(offsetof(SpriteTriangle, baseColor)    == 32,
+                      "SpriteTriangle must match shaders/common.glsl");
+        static_assert(offsetof(SpriteTriangle, flags)        == 48,
+                      "SpriteTriangle must match shaders/common.glsl");
 
     private:
         struct Accel
@@ -293,6 +334,10 @@ namespace Host
         GpuBuffer    m_instanceRecords;
         VkDeviceSize m_instanceRecordCapacity;
         uint32_t     m_instanceRecordCount;
+
+        GpuBuffer    m_spriteTriangles;
+        VkDeviceSize m_spriteTriangleCapacity;
+        uint32_t     m_spriteTriangleCount;
 
         GpuBuffer    m_scratch;
         VkDeviceSize m_scratchCapacity;

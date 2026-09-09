@@ -38,7 +38,21 @@ void main()
     float surfaceAlpha = 1.0;
 
     vec3 albedo = rec.baseColor.rgb;
-    if (rec.vertexAddress != 0ul && rec.uvOffset != kNoVertexAttribute)
+    if ((rec.flags & kRecordSpriteBatch) != 0u)
+    {
+        // The merged sprite batch: its material lives per triangle, keyed by
+        // gl_PrimitiveID, because the merge is what threw away which draw
+        // each triangle came from. Everything else about shading it - the
+        // geometric normal, the shadow ray, the lighting rig - is the same
+        // as for any other surface.
+        const SpriteTriangle spr = spriteTriangles[gl_PrimitiveID];
+        const vec4 sampled = SampleSprite(spr, SpriteUv(spr, attribs));
+
+        albedo = spr.baseColor.rgb * sampled.rgb;
+        if ((spr.flags & kRecordBlended) != 0u)
+            surfaceAlpha = sampled.a * spr.baseColor.a;
+    }
+    else if (rec.vertexAddress != 0ul && rec.uvOffset != kNoVertexAttribute)
     {
         FloatData verts = FloatData(rec.vertexAddress);
 

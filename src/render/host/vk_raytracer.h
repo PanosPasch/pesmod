@@ -73,9 +73,12 @@ namespace Host
         // Traces one frame against `tlas`. Returns false on a Vulkan error.
         // `textures` and `instanceRecords` may be null; the hit shader then
         // samples the white slot and shades with the base colour alone.
+        // `spriteTriangles` is the merged batch's per-triangle material
+        // table, and may be null in a frame that merged no sprites.
         bool Trace(VkAccelerationStructureKHR tlas, const SceneUniforms& uniforms,
                    const TextureCache* textures = nullptr,
-                   const GpuBuffer* instanceRecords = nullptr);
+                   const GpuBuffer* instanceRecords = nullptr,
+                   const GpuBuffer* spriteTriangles = nullptr);
 
         // Reads the output image back and writes a binary PPM. Slow — it
         // stalls on a queue wait — so it is for inspection and tests, not
@@ -107,7 +110,8 @@ namespace Host
         bool CreateDescriptors();
         void UpdateDescriptors(VkAccelerationStructureKHR tlas,
                                const TextureCache* textures,
-                               const GpuBuffer* instanceRecords);
+                               const GpuBuffer* instanceRecords,
+                               const GpuBuffer* spriteTriangles);
 
         VulkanDevice* m_device;
         GpuAllocator* m_alloc;

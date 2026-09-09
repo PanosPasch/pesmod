@@ -74,7 +74,7 @@ bool RayTracer::LoadShaderModule(const char* path, VkShaderModule& out)
 
 bool RayTracer::CreateDescriptors()
 {
-    VkDescriptorSetLayoutBinding bindings[6]{};
+    VkDescriptorSetLayoutBinding bindings[7]{};
     bindings[0].binding         = 0;
     bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     bindings[0].descriptorCount = 1;
@@ -123,9 +123,17 @@ bool RayTracer::CreateDescriptors()
     bindings[5].descriptorCount = kSamplerCount;
     bindings[5].stageFlags      = kRtStages;
 
+    // The merged sprite batch's per-triangle materials. See common.glsl:
+    // merging is what threw away which draw each triangle came from, and
+    // this is that identity put back.
+    bindings[6].binding         = 6;
+    bindings[6].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[6].descriptorCount = 1;
+    bindings[6].stageFlags      = kRtStages;
+
     VkDescriptorSetLayoutCreateInfo li{};
     li.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    li.bindingCount = 6;
+    li.bindingCount = 7;
     li.pBindings    = bindings;
     if (vkCreateDescriptorSetLayout(m_device->Device(), &li, nullptr,
                                     &m_setLayout) != VK_SUCCESS)
@@ -142,7 +150,9 @@ bool RayTracer::CreateDescriptors()
     sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;             sizes[2].descriptorCount = 1;
     sizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     sizes[3].descriptorCount = m_textureCapacity;
-    sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;             sizes[4].descriptorCount = 1;
+    // Two storage buffers now: the instance records and the sprite
+    // batch's per-triangle materials.
+    sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;             sizes[4].descriptorCount = 2;
     sizes[5].type = VK_DESCRIPTOR_TYPE_SAMPLER;    sizes[5].descriptorCount = kSamplerCount;
 
     VkDescriptorPoolCreateInfo pi{};
@@ -434,7 +444,8 @@ bool RayTracer::Resize(uint32_t width, uint32_t height)
 
 void RayTracer::UpdateDescriptors(VkAccelerationStructureKHR tlas,
                                   const TextureCache* textures,
-                                  const GpuBuffer* instanceRecords)
+                                  const GpuBuffer* instanceRecords,
+                                  const GpuBuffer* spriteTriangles)
 {
     VkWriteDescriptorSetAccelerationStructureKHR asInfo{};
     asInfo.sType                      = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
@@ -449,7 +460,7 @@ void RayTracer::UpdateDescriptors(VkAccelerationStructureKHR tlas,
     bufferInfo.buffer = m_uniforms.buffer;
     bufferInfo.range  = sizeof(SceneUniforms);
 
-    VkWriteDescriptorSet writes[7]{};
+    VkWriteDescriptorSet writes[8]{};
     writes[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].pNext           = &asInfo;
     writes[0].dstSet          = m_descriptorSet;
@@ -510,18 +521,38 @@ void RayTracer::UpdateDescriptors(VkAccelerationStructureKHR tlas,
         ++writeCount;
     }
 
+    // A frame that merged no sprites leaves binding 6 as the last frame left
+    // it, which is safe: the batch is not in the TLAS either, so nothing
+    // reads it. Writing a null descriptor instead would need the null
+    // descriptor feature for no benefit.
+    VkDescriptorBufferInfo spriteInfo{};
+    if (spriteTriangles && spriteTriangles->IsValid())
+    {
+        spriteInfo.buffer = spriteTriangles->buffer;
+        spriteInfo.range  = VK_WHOLE_SIZE;
+
+        writes[writeCount].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[writeCount].dstSet          = m_descriptorSet;
+        writes[writeCount].dstBinding      = 6;
+        writes[writeCount].descriptorCount = 1;
+        writes[writeCount].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[writeCount].pBufferInfo     = &spriteInfo;
+        ++writeCount;
+    }
+
     vkUpdateDescriptorSets(m_device->Device(), writeCount, writes, 0, nullptr);
 }
 
 bool RayTracer::Trace(VkAccelerationStructureKHR tlas, const SceneUniforms& uniforms,
-                      const TextureCache* textures, const GpuBuffer* instanceRecords)
+                      const TextureCache* textures, const GpuBuffer* instanceRecords,
+                      const GpuBuffer* spriteTriangles)
 {
     if (tlas == VK_NULL_HANDLE) { m_lastError = "no TLAS to trace against"; return false; }
 
     const double started = NowMs();
 
     memcpy(m_uniforms.mapped, &uniforms, sizeof(uniforms));
-    UpdateDescriptors(tlas, textures, instanceRecords);
+    UpdateDescriptors(tlas, textures, instanceRecords, spriteTriangles);
 
     VkCommandBufferAllocateInfo cbai{};
     cbai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;

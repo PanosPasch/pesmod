@@ -918,7 +918,8 @@ namespace
             u.params[1] = 1.0f;      // exposure
 
             if (!tracer.Trace(accel.Tlas(), u, &textures,
-                              &accel.InstanceRecords()))
+                              &accel.InstanceRecords(),
+                              &accel.SpriteTriangles()))
             {
                 printf("  [FAIL] trace: %s\n", tracer.LastError().c_str());
                 ++g_failures;
@@ -1423,7 +1424,8 @@ int main(int argc, char** argv)
             u.params[1] = 1.0f;
 
             if (tracer.Trace(accel.Tlas(), u, &textures,
-                             &accel.InstanceRecords()))
+                             &accel.InstanceRecords(),
+                             &accel.SpriteTriangles()))
             {
                 const uint64_t n = reported + 1;
                 if ((saveFrame && n == saveFrame) ||

@@ -577,7 +577,7 @@ So geometry is split by size:
 
 | Class | Threshold | Handling |
 | ----- | --------- | -------- |
-| Sprites | <= 2 triangles | transformed to world on the CPU, merged into **one** BLAS rebuilt per frame, one TLAS instance |
+| Sprites | <= 2 triangles | transformed to world on the CPU, merged into **one** BLAS rebuilt per frame, one TLAS instance, materials kept in a per-triangle table |
 | Meshes | larger | persistent BLAS keyed by geometry id, rebuilt only when the content hash changes |
 
 The persistent path is what makes CPU-skinned players affordable: their
@@ -935,29 +935,23 @@ pixels back and Windows will not preview a PPM.
 ## 7. Roadmap
 
 Done: the transport, the device, scene reconstruction, acceleration
-structures, and a ray tracing pipeline that traces every live frame. What
-remains is what turns a traced image into a renderer.
+structures, a ray tracing pipeline that traces every live frame, ordered
+transparency by depth peeling, per-sprite materials, and a window of its own
+to put the result in. What remains is what turns a correct image into a
+better one than the game's.
 
-1. **Ordered transparency.** Alpha testing removes the coplanar tie but is
-   binary: a surface is either there or absent. The game composites its
-   overlays, so partially transparent markings are currently all-or-nothing.
-   Proper blending needs ordered traversal, and is the next real step.
-2. **Sprites carry no material.** The merged sprite batch bakes triangles
-   from many draws into one structure, which loses their textures and UVs;
-   it renders white. Giving each source draw its own geometry within that
-   BLAS would restore per-sprite materials without going back to one
-   structure per quad.
-3. **Normals.** Currently geometric, so everything is faceted. The 32-byte
+1. **Normals.** Currently geometric, so everything is faceted. The 32-byte
    layout carries real per-vertex normals; they have to be carried through
    the scene stream and interpolated in the hit shader.
-4. **Presentation and input.** The host owns the visible window; the game
-   window becomes the input sink. The HUD draws are composited on top
-   unchanged, per the scope decision to leave the UI alone. Until this
-   exists, `--save-every` writing PNGs is the only way to see output.
-5. **Overlap.** Every submit is followed by `vkQueueWaitIdle`, so structure
+2. **The sky.** The game's sky is a textured dome the builder keeps out of
+   the TLAS, because at roughly 75 units from the camera it would occlude
+   the whole stadium. The miss shader currently returns a gradient between
+   the game's own sky and ground colours; sampling that dome by ray
+   direction instead would be the game's actual sky, at no traversal cost.
+3. **Overlap.** Every submit is followed by `vkQueueWaitIdle`, so structure
    builds and traces are fully serialised. Fences would let them overlap.
-6. **Lighting beyond the game's rig.** The captured constants are the seed —
+4. **Lighting beyond the game's rig.** The captured constants are the seed —
    directional `c95`/`c94`, hemisphere `c93`/`c92`/`c91`, specular
    `c63`/`c70` — then physical stadium floodlights and a sky model.
-7. **Path tracing + denoise.** DLSS Ray Reconstruction is already present in
+5. **Path tracing + denoise.** DLSS Ray Reconstruction is already present in
    the game folder, making it the natural denoiser target.

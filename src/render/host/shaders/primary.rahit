@@ -31,18 +31,28 @@ void main()
 {
     const InstanceRecord rec = instances[gl_InstanceCustomIndexEXT];
 
-    // The merged sprite batch has no vertex data of its own — its triangles
-    // were baked into world space from many draws — so there is no UV to
-    // test and it stays opaque.
-    // No vertex data, or no texture coordinates: nothing to test against,
-    // so the surface stays opaque.
-    if (rec.vertexAddress == 0ul || rec.uvOffset == kNoVertexAttribute) return;
+    float alpha;
+    if ((rec.flags & kRecordSpriteBatch) != 0u)
+    {
+        // The merged batch keeps its material per triangle rather than per
+        // instance, because its triangles came from many draws. Among them
+        // are the projected shadows, which are one blob in a mostly empty
+        // texture - so this is exactly the case the alpha test exists for.
+        const SpriteTriangle spr = spriteTriangles[gl_PrimitiveID];
+        if ((spr.flags & kRecordBlended) == 0u) return;   // an opaque sprite
+        alpha = SampleSprite(spr, SpriteUv(spr, attribs)).a * spr.baseColor.a;
+    }
+    else
+    {
+        // No vertex data, or no texture coordinates: nothing to test
+        // against, so the surface stays opaque.
+        if (rec.vertexAddress == 0ul || rec.uvOffset == kNoVertexAttribute) return;
 
-    const vec2 uv = HitUv(rec, gl_PrimitiveID, attribs);
-
-    // textureLod for the same reason as in the closest-hit shader: a ray
-    // tracing stage has no derivatives.
-    const float alpha = SampleInstance(rec, uv).a * rec.baseColor.a;
+        // textureLod for the same reason as in the closest-hit shader: a ray
+        // tracing stage has no derivatives.
+        alpha = SampleInstance(rec, HitUv(rec, gl_PrimitiveID, attribs)).a *
+                rec.baseColor.a;
+    }
 
     // Only genuinely empty texels are stepped over now. Partial alpha used
     // to be rejected here, which is a binary decision and the reason

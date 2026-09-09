@@ -52,7 +52,12 @@ struct InstanceRecord
     uint     _pad0, _pad1;
 };
 
-const uint kRecordBlended = 1u;
+const uint kRecordBlended    = 1u;
+
+// This record covers the merged sprite batch. Its triangles came from many
+// different draws, so the record itself carries no usable material; the
+// per-triangle table below does.
+const uint kRecordSpriteBatch = 2u;
 
 // ── The primary ray payload ──────────────────────────────────────────────
 //
@@ -108,6 +113,50 @@ layout(binding = 4, set = 0, std430) readonly buffer InstanceBlock
 {
     InstanceRecord instances[];
 };
+
+// ── The merged sprite batch's materials ──────────────────────────────────
+//
+// A sprite draw is two triangles, and there are around a hundred of them in
+// a frame: advertising hoardings, stand panels, projected shadows. Each
+// getting its own acceleration structure costs far more than tracing it, so
+// the builder bakes them into world space and merges them into one - which
+// throws away the thing a rasteriser gets for free, namely which draw a
+// triangle came from. Every one of those draws is textured, so throwing it
+// away is what left the batch rendering flat white.
+//
+// The batch is non-indexed, three vertices per triangle, so gl_PrimitiveID
+// indexes this table directly. Mirrors AccelBuilder::SpriteTriangle, which
+// static_asserts the layout.
+struct SpriteTriangle
+{
+    vec2 uv0;
+    vec2 uv1;
+    vec2 uv2;
+    uint textureSlot;
+    uint samplerIndex;
+    vec4 baseColor;
+    uint flags;             // kRecordBlended
+    uint _pad0, _pad1, _pad2;
+};
+
+layout(binding = 6, set = 0, std430) readonly buffer SpriteBlock
+{
+    SpriteTriangle spriteTriangles[];
+};
+
+// The sprite batch's UV at a hit, interpolated the same way HitUv does it.
+vec2 SpriteUv(SpriteTriangle spr, vec2 bary2)
+{
+    const vec3 bary = vec3(1.0 - bary2.x - bary2.y, bary2.x, bary2.y);
+    return bary.x * spr.uv0 + bary.y * spr.uv1 + bary.z * spr.uv2;
+}
+
+vec4 SampleSprite(SpriteTriangle spr, vec2 uv)
+{
+    return textureLod(sampler2D(textures[nonuniformEXT(spr.textureSlot)],
+                                samplers[nonuniformEXT(spr.samplerIndex)]),
+                      uv, 0.0);
+}
 
 // Vertex and index data is read through device addresses rather than bound
 // buffers, because there is no "current mesh" at hit time — the record says
