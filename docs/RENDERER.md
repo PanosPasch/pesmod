@@ -688,6 +688,14 @@ carrying its own length. Nothing to version, and a truncated file simply
 replays fewer frames. A replay stops at each frame boundary so the caller
 renders every recorded frame rather than racing to the end of the file.
 
+`tools/stream_pick.py` answers the other half of the question. A replayed
+frame shows what the renderer produced; the picker says what a given pixel
+actually *is*, by reproducing the ray generation, skinning and alpha test on
+the CPU straight from the recording and reporting the instance, its geometry,
+its texture and that texture's alpha statistics. That is what identified the
+face-painted quads as projected shadows sampled with the wrong address mode,
+in one pass rather than three game sessions.
+
 `--replaytest` records a stream and replays it, requiring the same frame
 index, instance count, resident geometry and textures, and a byte-identical
 texture payload. That check exists because a replay that quietly differed
