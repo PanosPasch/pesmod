@@ -78,6 +78,7 @@ desktop.ini
 .env.*
 !.env.example
 
-# Traced output from the self-test
-astest.ppm
-astest.png
+# Traced output from the self-test, written next to wherever it is run from.
+astest*.ppm
+astest*.png
+traced_frame*.png
