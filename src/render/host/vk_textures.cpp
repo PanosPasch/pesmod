@@ -180,6 +180,27 @@ bool TextureCache::UploadImage(const SceneIPC::TextureDesc& desc,
     }
     memcpy(staging.mapped, pixels, (size_t)total);
 
+    // X8R8G8B8 carries no alpha - the high byte is whatever the game happened
+    // to leave there, usually zero. Uploaded as-is, every such surface fails
+    // the any-hit alpha test and disappears; the pitch went first.
+    if (desc.format == SceneIPC::kTexBGRX8)
+    {
+        uint8_t* p = (uint8_t*)staging.mapped;
+        for (uint64_t b = 3; b < total; b += 4) p[b] = 255;
+        ++m_stats.opaqueForced;
+    }
+    else
+    {
+        // A texture that is transparent everywhere would never have been
+        // drawn by the game, so this means alpha it does not really have.
+        // Reported rather than corrected: silently forcing it opaque would
+        // hide the next format mistake instead of surfacing it.
+        const uint8_t* p = (const uint8_t*)staging.mapped;
+        bool anyAlpha = false;
+        for (uint64_t b = 3; b < total && !anyAlpha; b += 4) anyAlpha = (p[b] != 0);
+        if (!anyAlpha && total) ++m_stats.fullyTransparent;
+    }
+
     VkCommandBufferAllocateInfo cbai{};
     cbai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     cbai.commandPool        = m_commandPool;
@@ -258,11 +279,11 @@ void TextureCache::Sync(SceneReceiver& scene, uint32_t budget)
         const Texture* tex = scene.FindTexture(dirty[i]);
         if (!tex) continue;
 
-        if (tex->desc.format != SceneIPC::kTexBGRA8)
+        // Both are B8G8R8A8 in memory; they differ only in whether the high
+        // byte means anything. Anything else is counted, not guessed at.
+        if (tex->desc.format != SceneIPC::kTexBGRA8 &&
+            tex->desc.format != SceneIPC::kTexBGRX8)
         {
-            // Counted, not guessed at. Every texture in every capture of this
-            // game is A8R8G8B8; anything else means a build that differs and
-            // should be looked at rather than silently mis-decoded.
             ++m_stats.skippedFormat;
             scene.MarkTextureClean(dirty[i]);
             continue;

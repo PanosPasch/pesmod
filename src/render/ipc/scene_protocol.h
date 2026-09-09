@@ -101,7 +101,7 @@ namespace SceneIPC
     enum TextureFormat : uint32_t
     {
         kTexUnknown  = 0,
-        kTexBGRA8    = 1,   // D3DFMT_A8R8G8B8 / X8R8G8B8
+        kTexBGRA8    = 1,   // D3DFMT_A8R8G8B8
         kTexBGR565   = 2,
         kTexBGRA5551 = 3,
         kTexBGRA4444 = 4,
@@ -109,7 +109,14 @@ namespace SceneIPC
         kTexDXT3     = 6,
         kTexDXT5     = 7,
         kTexL8       = 8,
-        kTexA8L8     = 9
+        kTexA8L8     = 9,
+
+        // D3DFMT_X8R8G8B8. Byte-identical to kTexBGRA8, but the high
+        // byte is undefined rather than alpha - typically zero. Kept
+        // distinct because a consumer that alpha tests would otherwise
+        // discard every such surface, which is exactly what happened to
+        // the pitch.
+        kTexBGRX8    = 10
     };
 
     struct TextureDesc

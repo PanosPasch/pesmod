@@ -266,8 +266,11 @@ namespace
     {
         switch (fmt)
         {
-        case D3DFMT_A8R8G8B8:
-        case D3DFMT_X8R8G8B8: return kTexBGRA8;
+        case D3DFMT_A8R8G8B8: return kTexBGRA8;
+        // Not the same thing: X8 has no alpha, only an undefined byte where
+        // alpha would be. Reporting it as BGRA8 hands the consumer garbage
+        // coverage.
+        case D3DFMT_X8R8G8B8: return kTexBGRX8;
         case D3DFMT_R5G6B5:   return kTexBGR565;
         case D3DFMT_A1R5G5B5:
         case D3DFMT_X1R5G5B5: return kTexBGRA5551;

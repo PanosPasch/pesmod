@@ -887,7 +887,23 @@ int main(int argc, char** argv)
             }
         }
 
-        if (!quiet) { ReportFrame(rx); ReportAccel(accel.Stats()); }
+        if (!quiet)
+        {
+            ReportFrame(rx);
+            ReportAccel(accel.Stats());
+
+            // Only when there is something to say. A non-zero skippedFormat
+            // or fullyTransparent means textures are arriving in a shape the
+            // cache did not expect, which shows up as missing surfaces rather
+            // than as an error.
+            const Host::TextureStats& ts = textures.Stats();
+            if (ts.uploadedThisFrame || ts.skippedFormat || ts.fullyTransparent)
+                printf("    tex: %u resident (+%u this frame), %.1f MB | "
+                       "X8 forced opaque %u | unsupported %u | all-transparent %u\n",
+                       ts.resident, ts.uploadedThisFrame,
+                       ts.bytesResident / (1024.0 * 1024.0),
+                       ts.opaqueForced, ts.skippedFormat, ts.fullyTransparent);
+        }
         ++reported;
         if (maxFrames && reported >= maxFrames) break;
     }

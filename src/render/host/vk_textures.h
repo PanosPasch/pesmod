@@ -11,11 +11,17 @@
 //
 // ── Format ───────────────────────────────────────────────────────────────
 //
-// Every texture this game creates is D3DFMT_A8R8G8B8 — 1768 of 1768 across
-// every capture taken. That is exactly VK_FORMAT_B8G8R8A8_UNORM, so no
-// conversion happens. Anything else is counted and skipped rather than
-// guessed at; if a build of the game turns out to use DXT or 16-bit formats,
-// the counter says so instead of the screen filling with garbage.
+// The game creates 32-bit BGRA textures, which is exactly
+// VK_FORMAT_B8G8R8A8_UNORM, so no conversion happens. Anything else is
+// counted and skipped rather than guessed at; if a build turns out to use
+// DXT or 16-bit formats, the counter says so instead of the screen filling
+// with garbage.
+//
+// A8R8G8B8 and X8R8G8B8 are byte-identical and must still be told apart. In
+// X8 the high byte is not alpha, just whatever the game left there — usually
+// zero. Treated as alpha it makes every such surface fail the any-hit test
+// and vanish, which is what happened to the pitch, so those are forced
+// opaque on upload.
 //
 // ── Memory ───────────────────────────────────────────────────────────────
 //
@@ -45,6 +51,8 @@ namespace Host
         uint32_t uploadedThisFrame;
         uint32_t skippedFormat;     // not BGRA8
         uint32_t skippedFull;       // cache is at capacity
+        uint32_t opaqueForced;      // X8R8G8B8: alpha byte is not alpha
+        uint32_t fullyTransparent;  // suspicious: alpha zero everywhere
         uint64_t bytesResident;
     };
 
