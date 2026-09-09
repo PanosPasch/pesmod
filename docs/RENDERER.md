@@ -842,6 +842,25 @@ Two orientation hazards, both silent when wrong:
   scene has y >= 0 and the test camera only scales, so all of the geometry
   must land above the midline.
 
+**Texture addressing belongs to the draw, not the texture.** The renderer
+created one sampler, fixed to `REPEAT`, because that is the Direct3D default.
+It is only the default: `D3DTSS_ADDRESSU`/`ADDRESSV` are per texture stage and
+the game changes them.
+
+Found by replaying a recorded frame and picking the offending pixel with a
+CPU ray cast against the recording. The quads painting a player's face across
+the pitch turned out to be projected shadows: 140-triangle meshes sampling
+texture 1310, a mostly-black atlas with a face packed into one corner, with
+UVs running **0.398 to 5.602**. Wrapped, that tiles the atlas five times over
+the quad and the face lands on the grass. Clamped, it is one blob.
+
+Neither mode can be global, and forcing clamp on the same recorded frame
+proves it: the face quads vanish and the pitch collapses to flat salmon,
+because the grass genuinely tiles. So images and samplers are separate
+descriptors — `texture2D textures[]` and `sampler samplers[4]` — paired in
+the shader by an index the instance carries, which costs four samplers rather
+than a second copy of every image.
+
 **An empty alpha channel is not transparency.** 106 of 3,273 captured
 textures are A8R8G8B8 with alpha zero in every texel: the game allocated an
 alpha format and only ever wrote colour into it. Read as coverage, every

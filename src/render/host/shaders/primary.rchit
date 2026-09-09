@@ -60,15 +60,10 @@ void main()
                       + bary.y * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.y)
                       + bary.z * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.z);
 
-        // textureLod, not texture: a ray tracing stage has no derivatives,
-        // so there is no implicit mip level to compute. LOD 0 is sharp and
-        // will alias in the distance; picking a level from ray differentials
-        // is the proper fix and comes later.
-        //
-        // The slot varies between neighbouring rays, so the index is not
-        // uniform across the subgroup and has to say so.
-        albedo *= textureLod(textures[nonuniformEXT(rec.textureSlot)],
-                             uv, 0.0).rgb;
+        // LOD 0 rather than an implicit level: a ray tracing stage has no
+        // derivatives. It is sharp and will alias in the distance; choosing
+        // a level from ray differentials is the proper fix and comes later.
+        albedo *= SampleInstance(rec, uv).rgb;
     }
 
     // ── Normals ──────────────────────────────────────────────────────────

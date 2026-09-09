@@ -45,6 +45,22 @@ namespace Host
     // the same shader path with no branch and no invalid descriptor.
     const uint32_t kWhiteTextureSlot = 0;
 
+    // Texture addressing is a property of the draw, not of the texture: the
+    // pitch grass is tiled and wraps, while a projected shadow samples one
+    // blob out of a mostly-empty atlas with UVs running past 5 and must
+    // clamp. Wrapping that tiles the atlas over the quad.
+    //
+    // So images and samplers are separate descriptors and the shader pairs
+    // them, rather than one combined sampler baked to a single mode. Four
+    // covers every combination the game uses; the index is
+    // (U clamps ? 1 : 0) | (V clamps ? 2 : 0).
+    const uint32_t kSamplerCount = 4;
+
+    // Maps a packed D3DTSS_ADDRESSU/V pair, as InstanceDesc carries it, to
+    // one of those. Zero - the producer not having reported it - means the
+    // Direct3D default, which is wrap.
+    uint32_t SamplerIndexForAddress(uint32_t packedAddress);
+
     struct TextureStats
     {
         uint32_t resident;          // slots in use, including white
@@ -81,6 +97,10 @@ namespace Host
         { return m_descriptors; }
 
         uint32_t Capacity() const { return (uint32_t)m_descriptors.size(); }
+
+        // Sampler descriptors, indexed as SamplerIndexForAddress returns.
+        const std::vector<VkDescriptorImageInfo>& Samplers() const
+        { return m_samplerInfos; }
         const TextureStats& Stats() const { return m_stats; }
         const std::string& LastError() const { return m_lastError; }
 
@@ -106,7 +126,8 @@ namespace Host
         VulkanDevice* m_device;
         GpuAllocator* m_alloc;
         VkCommandPool m_commandPool;
-        VkSampler     m_sampler;
+        VkSampler     m_samplers[kSamplerCount];
+        std::vector<VkDescriptorImageInfo> m_samplerInfos;
 
         std::vector<Image>                     m_images;
         std::unordered_map<uint64_t, uint32_t> m_slotOf;

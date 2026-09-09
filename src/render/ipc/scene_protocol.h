@@ -44,7 +44,7 @@ namespace SceneIPC
 {
     // 'PSCN' — bumped whenever any structure below changes shape.
     static const uint32_t kSceneMagic   = 0x4E435350u;
-    static const uint32_t kSceneVersion = 5u;
+    static const uint32_t kSceneVersion = 6u;
 
     // Default shared mapping size. This is address space in the *32-bit*
     // process, which only has ~2 GB of it, so the default is deliberately
@@ -224,7 +224,17 @@ namespace SceneIPC
         // reads them.
         uint32_t  paletteRegisters; // 0 when the geometry is not skinned
         float     boneIndexScale;   // c57.z: colour byte -> palette row
-        uint32_t  _pad0;
+
+        // D3DTSS_ADDRESSU in the low byte, ADDRESSV in the next, both
+        // D3DTADDRESS_* values. Zero means the producer did not report them
+        // and the D3D default, WRAP, applies.
+        //
+        // This is per draw, not per texture, and it matters: the pitch grass
+        // is tiled and needs WRAP, while a projected shadow samples one blob
+        // out of a mostly-empty atlas with UVs running to 5.6 and needs
+        // CLAMP. Sampling that with WRAP tiles the atlas across the quad and
+        // paints the player's face onto the grass five times over.
+        uint32_t  textureAddress;
     };
 
     enum InstanceFlags : uint32_t

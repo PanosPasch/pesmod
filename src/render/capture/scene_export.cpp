@@ -1191,6 +1191,11 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
         inst.boneIndexScale   = state.vsConstants[57][2];   // c57.z
     }
 
+    // Texture addressing is a stage state, and stage 0 is the base map.
+    inst.textureAddress =
+        (state.stageState[0][D3DTSS_ADDRESSU] & 0xFFu) |
+        ((state.stageState[0][D3DTSS_ADDRESSV] & 0xFFu) << 8);
+
     if (state.renderState[D3DRS_ALPHABLENDENABLE]) inst.flags |= kInstanceAlphaBlend;
     if (!state.renderState[D3DRS_ZWRITEENABLE])    inst.flags |= kInstanceNoDepthWrite;
     if (state.renderState[D3DRS_ALPHATESTENABLE])  inst.flags |= kInstanceAlphaTest;

@@ -908,8 +908,9 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
         // most common one in the game. See DescribeDeclLayout.
         rec.uvOffset = geo->desc.uvOffset;
 
-        rec.textureSlot = textures ? textures->Slot(inst.baseTextureId)
-                                   : kWhiteTextureSlot;
+        rec.textureSlot  = textures ? textures->Slot(inst.baseTextureId)
+                                    : kWhiteTextureSlot;
+        rec.samplerIndex = SamplerIndexForAddress(inst.textureAddress);
         memcpy(rec.baseColor, inst.baseColorFactor, sizeof(rec.baseColor));
 
         VkAccelerationStructureInstanceKHR out{};
@@ -956,7 +957,8 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
         // carry their own UVs and materials through the merge.
         InstanceRecord rec;
         memset(&rec, 0, sizeof(rec));
-        rec.textureSlot = kWhiteTextureSlot;
+        rec.textureSlot  = kWhiteTextureSlot;
+        rec.samplerIndex = 0;
         rec.baseColor[0] = rec.baseColor[1] = rec.baseColor[2] = rec.baseColor[3] = 1.0f;
 
         VkAccelerationStructureInstanceKHR out{};

@@ -142,13 +142,20 @@ namespace Host
             uint32_t indexStride;   // 2 or 4; 0 means non-indexed
             uint32_t textureSlot;
             float    baseColor[4];
+
+            // Which sampler pairs with that texture. Addressing belongs to
+            // the draw, not the image, so it travels with the instance.
+            uint32_t samplerIndex;
+            uint32_t _pad0, _pad1, _pad2;
         };
 
-        static_assert(sizeof(InstanceRecord) == 48,
+        static_assert(sizeof(InstanceRecord) == 64,
                       "InstanceRecord must match its std430 layout in "
                       "shaders/common.glsl");
-        static_assert(offsetof(InstanceRecord, baseColor) == 32,
+        static_assert(offsetof(InstanceRecord, baseColor)    == 32,
                       "vec4 is 16-byte aligned in std430");
+        static_assert(offsetof(InstanceRecord, samplerIndex) == 48,
+                      "InstanceRecord must match shaders/common.glsl");
 
     private:
         struct Accel

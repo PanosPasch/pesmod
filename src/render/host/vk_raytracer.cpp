@@ -74,7 +74,7 @@ bool RayTracer::LoadShaderModule(const char* path, VkShaderModule& out)
 
 bool RayTracer::CreateDescriptors()
 {
-    VkDescriptorSetLayoutBinding bindings[5]{};
+    VkDescriptorSetLayoutBinding bindings[6]{};
     bindings[0].binding         = 0;
     bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     bindings[0].descriptorCount = 1;
@@ -98,7 +98,7 @@ bool RayTracer::CreateDescriptors()
     // partially-bound array would work too, but a fully populated one cannot
     // fault on a slot that has not arrived yet.
     bindings[3].binding         = 3;
-    bindings[3].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[3].descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     bindings[3].descriptorCount = m_textureCapacity;
     // Every ray tracing stage, not just closest-hit. common.glsl is included
     // by the miss shaders too, so its declarations appear in their SPIR-V
@@ -115,9 +115,17 @@ bool RayTracer::CreateDescriptors()
     bindings[4].descriptorCount = 1;
     bindings[4].stageFlags      = kRtStages;
 
+    // Samplers, separate from the images. Texture addressing belongs to the
+    // draw rather than the texture, so pairing them in the shader avoids
+    // holding two copies of every image.
+    bindings[5].binding         = 5;
+    bindings[5].descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER;
+    bindings[5].descriptorCount = kSamplerCount;
+    bindings[5].stageFlags      = kRtStages;
+
     VkDescriptorSetLayoutCreateInfo li{};
     li.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    li.bindingCount = 5;
+    li.bindingCount = 6;
     li.pBindings    = bindings;
     if (vkCreateDescriptorSetLayout(m_device->Device(), &li, nullptr,
                                     &m_setLayout) != VK_SUCCESS)
@@ -128,18 +136,19 @@ bool RayTracer::CreateDescriptors()
 
     // One pool entry per descriptor type in the layout; a type present in the
     // layout but absent here fails allocation.
-    VkDescriptorPoolSize sizes[5]{};
+    VkDescriptorPoolSize sizes[6]{};
     sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR; sizes[0].descriptorCount = 1;
     sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;              sizes[1].descriptorCount = 1;
     sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;             sizes[2].descriptorCount = 1;
-    sizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    sizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     sizes[3].descriptorCount = m_textureCapacity;
     sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;             sizes[4].descriptorCount = 1;
+    sizes[5].type = VK_DESCRIPTOR_TYPE_SAMPLER;    sizes[5].descriptorCount = kSamplerCount;
 
     VkDescriptorPoolCreateInfo pi{};
     pi.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pi.maxSets       = 1;
-    pi.poolSizeCount = 5;
+    pi.poolSizeCount = 6;
     pi.pPoolSizes    = sizes;
     if (vkCreateDescriptorPool(m_device->Device(), &pi, nullptr,
                                &m_descriptorPool) != VK_SUCCESS)
@@ -440,7 +449,7 @@ void RayTracer::UpdateDescriptors(VkAccelerationStructureKHR tlas,
     bufferInfo.buffer = m_uniforms.buffer;
     bufferInfo.range  = sizeof(SceneUniforms);
 
-    VkWriteDescriptorSet writes[5]{};
+    VkWriteDescriptorSet writes[7]{};
     writes[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].pNext           = &asInfo;
     writes[0].dstSet          = m_descriptorSet;
@@ -473,8 +482,16 @@ void RayTracer::UpdateDescriptors(VkAccelerationStructureKHR tlas,
         writes[writeCount].dstSet          = m_descriptorSet;
         writes[writeCount].dstBinding      = 3;
         writes[writeCount].descriptorCount = textures->Capacity();
-        writes[writeCount].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[writeCount].descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
         writes[writeCount].pImageInfo      = textures->Descriptors().data();
+        ++writeCount;
+
+        writes[writeCount].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[writeCount].dstSet          = m_descriptorSet;
+        writes[writeCount].dstBinding      = 5;
+        writes[writeCount].descriptorCount = (uint32_t)textures->Samplers().size();
+        writes[writeCount].descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER;
+        writes[writeCount].pImageInfo      = textures->Samplers().data();
         ++writeCount;
     }
 

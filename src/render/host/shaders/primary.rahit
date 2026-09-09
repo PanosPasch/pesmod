@@ -42,9 +42,7 @@ void main()
 
     // textureLod for the same reason as in the closest-hit shader: a ray
     // tracing stage has no derivatives.
-    const float alpha =
-        textureLod(textures[nonuniformEXT(rec.textureSlot)], uv, 0.0).a *
-        rec.baseColor.a;
+    const float alpha = SampleInstance(rec, uv).a * rec.baseColor.a;
 
     if (alpha < kAlphaCutoff) ignoreIntersectionEXT;
 }

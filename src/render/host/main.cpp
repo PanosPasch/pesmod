@@ -68,6 +68,7 @@ namespace
             "  --replaytest       check record/replay (no GPU), exit\n"
             "  --record <file>    tee the scene stream to a file\n"
             "  --replay <file>    render a recording instead of the game\n"
+            "  --skip <n>         drain n frames without rendering them\n"
             "  --shaders <dir>    directory holding the compiled .spv files\n"
             "                     (default: shaders)\n"
             "  --trace-height <n> traced image height; the width follows the\n"
@@ -1129,6 +1130,10 @@ int main(int argc, char** argv)
     uint32_t    textureBudget = 8;
     const char* recordPath = nullptr;
     const char* replayPath = nullptr;
+    // Frames to drain without building or tracing. A recording usually
+    // opens on menus, and skipping to the part being investigated keeps
+    // the edit-run-look loop to a few seconds.
+    uint64_t    skipFrames = 0;
     const char* savePath = "traced_frame.png";
 
     for (int i = 1; i < argc; ++i)
@@ -1146,6 +1151,8 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--replaytest")) replayTest = true;
         else if (!strcmp(argv[i], "--record") && i + 1 < argc) recordPath = argv[++i];
         else if (!strcmp(argv[i], "--replay") && i + 1 < argc) replayPath = argv[++i];
+        else if (!strcmp(argv[i], "--skip") && i + 1 < argc)
+            skipFrames = strtoull(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--shaders") && i + 1 < argc) shaderDir = argv[++i];
         else if (!strcmp(argv[i], "--trace-height") && i + 1 < argc)
             traceHeight = (uint32_t)strtoul(argv[++i], nullptr, 10);
@@ -1252,7 +1259,7 @@ int main(int argc, char** argv)
             printf("WARNING: cannot write recording to %s\n", recordPath);
     }
 
-    uint64_t reported = 0;
+    uint64_t reported = 0, skipped = 0;
     while (!g_quit)
     {
         if (!rx.Poll())
@@ -1261,6 +1268,17 @@ int main(int argc, char** argv)
             // the file; nothing more is coming.
             if (rx.IsReplaying()) break;
             Sleep(1);
+            continue;
+        }
+
+        // Textures upload while skipping too. Draining the messages alone
+        // is not enough: the receiver would hold them but the GPU cache
+        // would still be empty, and the first rendered frame would sample
+        // white for everything - which looks exactly like a texture bug.
+        if (skipped < skipFrames)
+        {
+            ++skipped;
+            textures.Sync(rx, textureBudget);
             continue;
         }
 

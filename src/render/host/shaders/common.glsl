@@ -47,6 +47,8 @@ struct InstanceRecord
     uint     indexStride;   // 2 or 4; 0 means non-indexed
     uint     textureSlot;
     vec4     baseColor;
+    uint     samplerIndex;   // addressing belongs to the draw, not the image
+    uint     _pad0, _pad1, _pad2;
 };
 
 layout(binding = 0, set = 0) uniform accelerationStructureEXT topLevel;
@@ -55,7 +57,23 @@ layout(binding = 2, set = 0) uniform SceneBlock { SceneUniforms scene; };
 
 // Every texture the scene could hit, reachable at once. Slot 0 is a 1x1
 // white texture, so an untextured surface takes the same path with no branch.
-layout(binding = 3, set = 0) uniform sampler2D textures[];
+//
+// Images and samplers are separate so a texture can be sampled wrapped by
+// one draw and clamped by another without holding two copies of it: the
+// pitch grass tiles, while a projected shadow reads one blob out of a
+// mostly-empty atlas and must clamp.
+layout(binding = 3, set = 0) uniform texture2D textures[];
+layout(binding = 5, set = 0) uniform sampler   samplers[];
+
+// Pairs the instance's texture with the sampler its draw asked for. The slot
+// varies between neighbouring rays, so it is not uniform across the subgroup
+// and has to say so.
+vec4 SampleInstance(InstanceRecord rec, vec2 uv)
+{
+    return textureLod(sampler2D(textures[nonuniformEXT(rec.textureSlot)],
+                                samplers[nonuniformEXT(rec.samplerIndex)]),
+                      uv, 0.0);
+}
 
 layout(binding = 4, set = 0, std430) readonly buffer InstanceBlock
 {

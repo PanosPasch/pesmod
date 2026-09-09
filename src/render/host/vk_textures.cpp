@@ -20,10 +20,21 @@ namespace
     }
 }
 
+// D3DTADDRESS_CLAMP is 3; BORDER and MIRRORONCE are treated as clamp, which
+// is closer than wrapping and neither appears in this game.
+uint32_t SamplerIndexForAddress(uint32_t packedAddress)
+{
+    const uint32_t u = packedAddress & 0xFFu;
+    const uint32_t v = (packedAddress >> 8) & 0xFFu;
+    const uint32_t uClamp = (u >= 3u) ? 1u : 0u;
+    const uint32_t vClamp = (v >= 3u) ? 1u : 0u;
+    return uClamp | (vClamp << 1);
+}
+
 TextureCache::TextureCache()
     : m_device(nullptr), m_alloc(nullptr), m_commandPool(VK_NULL_HANDLE)
-    , m_sampler(VK_NULL_HANDLE)
 {
+    for (uint32_t i = 0; i < kSamplerCount; ++i) m_samplers[i] = VK_NULL_HANDLE;
     memset(&m_stats, 0, sizeof(m_stats));
 }
 
@@ -51,22 +62,36 @@ bool TextureCache::Init(VulkanDevice* device, GpuAllocator* allocator)
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(m_device->PhysicalDevice(), &props);
 
-    VkSamplerCreateInfo si{};
-    si.sType            = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    si.magFilter        = VK_FILTER_LINEAR;
-    si.minFilter        = VK_FILTER_LINEAR;
-    si.mipmapMode       = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    si.addressModeU     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    si.addressModeV     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    si.addressModeW     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    si.anisotropyEnable = VK_TRUE;
-    si.maxAnisotropy    = props.limits.maxSamplerAnisotropy;
-    si.maxLod           = VK_LOD_CLAMP_NONE;
-    si.borderColor      = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
-    if (vkCreateSampler(m_device->Device(), &si, nullptr, &m_sampler) != VK_SUCCESS)
+    // One sampler per addressing combination; the shader picks by index.
+    m_samplerInfos.resize(kSamplerCount);
+    for (uint32_t i = 0; i < kSamplerCount; ++i)
     {
-        m_lastError = "sampler creation failed";
-        return false;
+        const VkSamplerAddressMode u = (i & 1u)
+            ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE : VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        const VkSamplerAddressMode v = (i & 2u)
+            ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE : VK_SAMPLER_ADDRESS_MODE_REPEAT;
+
+        VkSamplerCreateInfo si{};
+        si.sType            = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        si.magFilter        = VK_FILTER_LINEAR;
+        si.minFilter        = VK_FILTER_LINEAR;
+        si.mipmapMode       = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        si.addressModeU     = u;
+        si.addressModeV     = v;
+        si.addressModeW     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        si.anisotropyEnable = VK_TRUE;
+        si.maxAnisotropy    = props.limits.maxSamplerAnisotropy;
+        si.maxLod           = VK_LOD_CLAMP_NONE;
+        si.borderColor      = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+
+        if (vkCreateSampler(m_device->Device(), &si, nullptr,
+                            &m_samplers[i]) != VK_SUCCESS)
+        {
+            m_lastError = "sampler creation failed";
+            return false;
+        }
+        m_samplerInfos[i] = VkDescriptorImageInfo{};
+        m_samplerInfos[i].sampler = m_samplers[i];
     }
 
     m_images.resize(kCapacity);
@@ -76,9 +101,11 @@ bool TextureCache::Init(VulkanDevice* device, GpuAllocator* allocator)
 
     // Every slot starts pointing at white, so the array is valid before a
     // single game texture has arrived.
+    // Images only: the sampler is a separate descriptor now, so the same
+    // texture can be sampled wrapped or clamped without duplicating it.
     for (uint32_t i = 0; i < kCapacity; ++i)
     {
-        m_descriptors[i].sampler     = m_sampler;
+        m_descriptors[i].sampler     = VK_NULL_HANDLE;
         m_descriptors[i].imageView   = m_images[kWhiteTextureSlot].view;
         m_descriptors[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
@@ -328,7 +355,7 @@ void TextureCache::Sync(SceneReceiver& scene, uint32_t budget)
             continue;
         }
 
-        m_descriptors[slot].sampler     = m_sampler;
+        m_descriptors[slot].sampler     = VK_NULL_HANDLE;
         m_descriptors[slot].imageView   = m_images[slot].view;
         m_descriptors[slot].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         m_stats.bytesResident += m_images[slot].bytes;
@@ -362,11 +389,13 @@ void TextureCache::Shutdown()
     m_descriptors.clear();
     m_slotOf.clear();
 
-    if (m_sampler)
+    for (uint32_t i = 0; i < kSamplerCount; ++i)
     {
-        vkDestroySampler(m_device->Device(), m_sampler, nullptr);
-        m_sampler = VK_NULL_HANDLE;
+        if (!m_samplers[i]) continue;
+        vkDestroySampler(m_device->Device(), m_samplers[i], nullptr);
+        m_samplers[i] = VK_NULL_HANDLE;
     }
+    m_samplerInfos.clear();
     if (m_commandPool)
     {
         vkDestroyCommandPool(m_device->Device(), m_commandPool, nullptr);
