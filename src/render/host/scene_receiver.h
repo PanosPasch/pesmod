@@ -67,6 +67,12 @@ namespace Host
         uint64_t malformedMessages;
         uint64_t geometryEvicted;
         uint64_t texturesEvicted;
+
+        // Geometry this host was asked to draw but did not have, and so
+        // asked the producer to send again. Should settle to zero within a
+        // frame or two of any gap; a steady non-zero value means the
+        // producer is not honouring the requests.
+        uint64_t resendRequested;
     };
 
     class SceneReceiver
@@ -147,5 +153,6 @@ namespace Host
         Frame          m_building;   // frame currently being assembled
         ReceiverStats  m_stats;
         uint64_t       m_residentBytes;
+        std::vector<uint64_t> m_resendScratch;
     };
 }

@@ -592,6 +592,30 @@ recovered matrix is checked for affinity and the failures are counted rather
 than silently used — a wrong VP would otherwise scatter geometry across the
 scene with no error anywhere.
 
+**Cache coherence needs a channel, not an invariant.** The producer decides
+whether to re-send a geometry from its own record of what it has already
+sent; the host caches independently. The original arrangement was meant to
+make disagreement impossible — the producer forgets an id after 60 frames of
+not drawing it, the host keeps one for 900, so anything the producer believes
+cached must still be there.
+
+That reasoning is wrong, and measurably so: a live frame had **278 of 992
+instances** referencing geometry the host had evicted and the producer would
+never send again. The two windows count different clocks. The producer's
+counts frames in which it *drew* the geometry; the host's counts frames it
+actually *processed*. Whenever the host runs behind, the second advances more
+slowly, and geometry drawn continuously can age out of the host's cache while
+the producer still believes it is there. After that it is permanent, because
+nothing ever tells the producer otherwise.
+
+So the host asks instead of the producer guessing. The ring header carries a
+256-slot table of geometry ids the host was told to draw and does not have;
+the producer clears those from its sent-set at the start of each frame, and
+the next draw re-sends them. One writer, one reader, and a lost request is
+simply made again next frame, so a release store on the count is all the
+ordering required. `PESModHost --resendtest` runs the whole loop in one
+process with no GPU.
+
 **Batching.** Builds are prepared first and recorded into a single command
 buffer with sub-allocated scratch. Submitting and waiting per structure
 measured ~7 ms of overhead each; the self-test dropped from 22.5 ms to

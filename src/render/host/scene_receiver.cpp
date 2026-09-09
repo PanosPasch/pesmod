@@ -1,6 +1,7 @@
 // scene_receiver.cpp
 #include "scene_receiver.h"
 
+#include <algorithm>
 #include <cstring>
 
 using namespace SceneIPC;
@@ -211,13 +212,36 @@ void SceneReceiver::HandleMessage(const uint8_t* msg, uint32_t bytes)
         m_building.complete = true;
         m_frame = m_building;
 
+        // Touch what this frame used, and ask for what it needed and did
+        // not have. The second half is why the producer's own record of what
+        // it has sent cannot be trusted alone - see RingHeader's resend table.
+        m_resendScratch.clear();
         for (size_t i = 0; i < m_frame.instances.size(); ++i)
         {
             const InstanceDesc& in = m_frame.instances[i];
             auto g = m_geometry.find(in.geometryId);
-            if (g != m_geometry.end()) g->second.lastUsedFrame = m_frame.begin.frameIndex;
+            if (g != m_geometry.end())
+                g->second.lastUsedFrame = m_frame.begin.frameIndex;
+            else
+                m_resendScratch.push_back(in.geometryId);
+
             auto t = m_textures.find(in.baseTextureId);
             if (t != m_textures.end()) t->second.lastUsedFrame = m_frame.begin.frameIndex;
+        }
+
+        if (!m_resendScratch.empty())
+        {
+            // Many instances share a geometry, so the raw list repeats
+            // heavily; the table has 256 slots and asking for one id ten
+            // times would waste nine of them.
+            std::sort(m_resendScratch.begin(), m_resendScratch.end());
+            m_resendScratch.erase(
+                std::unique(m_resendScratch.begin(), m_resendScratch.end()),
+                m_resendScratch.end());
+
+            m_stats.resendRequested += m_resendScratch.size();
+            m_ring.RequestResend(m_resendScratch.data(),
+                                 (uint32_t)m_resendScratch.size());
         }
 
         ++m_stats.framesCompleted;

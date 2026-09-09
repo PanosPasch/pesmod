@@ -63,6 +63,8 @@ namespace
             "  --quiet            only print the summary\n"
             "  --probe            create the Vulkan RT device, report, exit\n"
             "  --astest           trace a synthetic scene, self-check, exit\n"
+            "  --skintest         check the skinning kernel, exit\n"
+            "  --resendtest       check the resend loop (no GPU), exit\n"
             "  --shaders <dir>    directory holding the compiled .spv files\n"
             "                     (default: shaders)\n"
             "  --trace-height <n> traced image height; the width follows the\n"
@@ -163,6 +165,101 @@ namespace
                    "%u never sent)\n", missing, evicted, neverSent);
     }
 
+
+
+    // The consumer -> producer resend loop, end to end in one process.
+    //
+    // This is the invariant that failed twice: the producer decided whether
+    // to re-send from its own record of what it had sent, the consumer
+    // evicted on its own schedule, and nothing reconciled them. A frame
+    // measured live had 278 of 992 instances referencing geometry the
+    // consumer had dropped and the producer would never send again.
+    //
+    // Needs no GPU, so it runs before the device is created.
+    int RunResendTest()
+    {
+        const char* kSection = "Local\\PESMod.SceneStream.ResendTest";
+        printf("-------- resend loop --------\n\n");
+
+        SceneIPC::SharedRing producer;
+        if (!producer.CreateAsProducer(kSection, 1ull * 1024ull * 1024ull))
+        {
+            printf("FAIL: could not create the test section\n");
+            return 1;
+        }
+
+        const uint64_t kSent    = 0xAAAA000000000001ull;
+        const uint64_t kMissing = 0xBBBB000000000002ull;
+
+        // One geometry actually sent...
+        {
+            struct V { float px, py, pz; };
+            V verts[3] = { {0,0,0}, {1,0,0}, {0,1,0} };
+
+            SceneIPC::GeometryDesc gd{};
+            gd.geometryId   = kSent;
+            gd.vertexKind   = SceneIPC::kVertexPreLit;
+            gd.vertexStride = sizeof(V);
+            gd.vertexCount  = 3;
+            gd.uvOffset     = SceneIPC::kNoVertexAttribute;
+            gd.normalOffset = SceneIPC::kNoVertexAttribute;
+            gd.colorOffset  = SceneIPC::kNoVertexAttribute;
+            producer.TryWrite(SceneIPC::kMsgGeometry, &gd, sizeof(gd),
+                              verts, sizeof(verts), false);
+        }
+
+        // ...and a frame that draws it twice plus one geometry never sent,
+        // twice as well, so the duplicate collapsing is covered too.
+        SceneIPC::FrameBegin fb{};
+        fb.frameIndex    = 7;
+        fb.renderWidth   = 640;
+        fb.renderHeight  = 480;
+        fb.instanceCount = 4;
+        producer.TryWrite(SceneIPC::kMsgFrameBegin, &fb, sizeof(fb), nullptr, 0, true);
+
+        const uint64_t ids[4] = { kSent, kMissing, kSent, kMissing };
+        for (int i = 0; i < 4; ++i)
+        {
+            SceneIPC::InstanceDesc inst{};
+            inst.geometryId = ids[i];
+            producer.TryWrite(SceneIPC::kMsgInstance, &inst, sizeof(inst),
+                              nullptr, 0, true);
+        }
+
+        SceneIPC::FrameEnd fe{};
+        fe.frameIndex    = 7;
+        fe.instanceCount = 4;
+        producer.TryWrite(SceneIPC::kMsgFrameEnd, &fe, sizeof(fe), nullptr, 0, true);
+
+        Host::SceneReceiver rx;
+        if (!rx.Attach(kSection)) { printf("FAIL: could not attach\n"); return 1; }
+        rx.Poll();
+
+        check(rx.CurrentFrame().instances.size() == 4, "4 instances decoded");
+        check(rx.FindGeometry(kSent) != nullptr,   "the sent geometry is resident");
+        check(rx.FindGeometry(kMissing) == nullptr, "the other one is not");
+
+        // Two instances referenced it, but the request is for the id, once.
+        check(rx.Stats().resendRequested == 1,
+              "the consumer asked for the missing geometry, and only once "
+              "despite two instances wanting it");
+
+        uint64_t wanted[SceneIPC::kMaxResendRequests];
+        const uint32_t n = producer.TakeResendRequests(
+            wanted, SceneIPC::kMaxResendRequests);
+        check(n == 1 && wanted[0] == kMissing,
+              "the producer received exactly that id");
+
+        // Taking clears the table, so a request is served once and anything
+        // still needed is asked for again next frame.
+        const uint32_t again = producer.TakeResendRequests(
+            wanted, SceneIPC::kMaxResendRequests);
+        check(again == 0, "the table is empty once taken");
+
+        printf("\n%s\n", g_failures == 0 ? "ALL CHECKS PASSED"
+                                         : "FAILURES PRESENT");
+        return g_failures == 0 ? 0 : 1;
+    }
 
     // Checks the skinning kernel against arithmetic done by hand.
     //
@@ -879,6 +976,7 @@ int main(int argc, char** argv)
     bool        probeOnly = false;
     bool        asTest = false;
     bool        skinTest = false;
+    bool        resendTest = false;
     bool        validation = true;
     std::string shaderDirStorage = ResolveShaderDir();
     const char* shaderDir = shaderDirStorage.c_str();
@@ -905,6 +1003,7 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--probe")) probeOnly = true;
         else if (!strcmp(argv[i], "--astest")) asTest = true;
         else if (!strcmp(argv[i], "--skintest")) skinTest = true;
+        else if (!strcmp(argv[i], "--resendtest")) resendTest = true;
         else if (!strcmp(argv[i], "--shaders") && i + 1 < argc) shaderDir = argv[++i];
         else if (!strcmp(argv[i], "--trace-height") && i + 1 < argc)
             traceHeight = (uint32_t)strtoul(argv[++i], nullptr, 10);
@@ -921,6 +1020,9 @@ int main(int argc, char** argv)
     }
 
     SetConsoleCtrlHandler(ConsoleHandler, TRUE);
+
+    // Needs no device, so it runs before one is created.
+    if (resendTest) return RunResendTest();
 
     printf("PESMod render host (%d-bit)\n\n", (int)sizeof(void*) * 8);
 

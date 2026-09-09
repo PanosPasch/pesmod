@@ -37,6 +37,11 @@ namespace SceneIPC
 {
     // Shared control block, at offset 0 of the mapping. The data buffer
     // follows immediately after.
+    // How many geometry ids the consumer can ask to have re-sent in one
+    // frame. A request that does not fit is simply made again next frame, so
+    // this bounds the table rather than the recovery.
+    static const uint32_t kMaxResendRequests = 256;
+
     struct RingHeader
     {
         uint32_t magic;
@@ -56,10 +61,44 @@ namespace SceneIPC
         volatile uint32_t consumerPid;
         volatile uint32_t producerAlive;
         volatile uint32_t consumerAlive;
+
+        // ── Consumer -> producer: geometry it needs re-sent ───────────────
+        //
+        // The producer decides whether to re-send a geometry from its own
+        // record of what it has already sent; the consumer caches
+        // independently. Two caches with no channel between them agree only
+        // by luck, and the arrangement here was meant to make disagreement
+        // impossible: the producer forgets an id after 60 frames of not
+        // drawing it, the consumer keeps one for 900, so anything the
+        // producer believes cached must still be there.
+        //
+        // That reasoning is wrong, because those are different clocks. The
+        // producer's counts frames in which it *drew* the geometry; the
+        // consumer's counts frames it actually *processed*. Whenever the
+        // consumer runs behind, the second advances more slowly than the
+        // first, and geometry drawn continuously can age out of the
+        // consumer's cache while the producer still believes it is there -
+        // after which it is never re-sent, because nothing ever tells the
+        // producer otherwise. Measured live: 278 of 992 instances in a frame,
+        // every frame, permanently.
+        //
+        // So the consumer asks instead of the producer guessing. It writes
+        // the ids it was told to draw but does not have; the producer drops
+        // those from its sent-set and re-sends them on the next draw. One
+        // writer, one reader, and a lost or overwritten request is just made
+        // again next frame - so a release on the count is all the ordering
+        // this needs.
+        volatile uint32_t resendCount;
+        uint32_t          _pad1;
+        uint64_t          resendIds[kMaxResendRequests];
     };
 
-    static_assert(sizeof(RingHeader) == 80,
+    // 80 bytes of cursors and counters, then the resend table: 8 for the
+    // count and its padding, plus 256 ids.
+    static_assert(sizeof(RingHeader) == 88 + kMaxResendRequests * 8,
                   "RingHeader changed size - 32/64-bit ABI would diverge");
+    static_assert(offsetof(RingHeader, resendCount) == 80, "RingHeader layout");
+    static_assert(offsetof(RingHeader, resendIds)   == 88, "RingHeader layout");
     static_assert(offsetof(RingHeader, capacityBytes) == 16, "RingHeader layout");
     static_assert(offsetof(RingHeader, writeCursor)   == 24, "RingHeader layout");
     static_assert(offsetof(RingHeader, readCursor)    == 32, "RingHeader layout");
@@ -101,6 +140,15 @@ namespace SceneIPC
         // Copies the next message into `buffer`. Returns false when the ring
         // is empty or the message is larger than `bufferBytes` (in which case
         // `outNeededBytes` reports the size required and nothing is consumed).
+        // Consumer side: ask for these geometry ids to be sent again. Later
+        // calls in the same frame overwrite earlier ones, which is harmless -
+        // the consumer re-derives the list from the next frame it builds.
+        void RequestResend(const uint64_t* ids, uint32_t count);
+
+        // Producer side: take whatever the consumer asked for and clear the
+        // table. Returns how many ids were written to `out`.
+        uint32_t TakeResendRequests(uint64_t* out, uint32_t max);
+
         bool TryRead(void* buffer, uint32_t bufferBytes,
                      uint32_t* outMessageBytes, uint32_t* outNeededBytes);
 

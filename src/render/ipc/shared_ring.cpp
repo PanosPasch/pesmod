@@ -28,6 +28,11 @@ namespace
         InterlockedExchange64((volatile LONG64*)p, (LONG64)value);
     }
 
+    inline uint32_t ExchangeRelease32(volatile uint32_t* p, uint32_t value)
+    {
+        return (uint32_t)InterlockedExchange((volatile LONG*)p, (LONG)value);
+    }
+
     inline void Increment64(volatile uint64_t* p, uint64_t delta)
     {
         InterlockedAdd64((volatile LONG64*)p, (LONG64)delta);
@@ -291,4 +296,32 @@ bool SharedRing::TryRead(void* buffer, uint32_t bufferBytes,
     return true;
 }
 
+
+
+void SharedRing::RequestResend(const uint64_t* ids, uint32_t count)
+{
+    if (!m_header || !ids) return;
+    if (count > kMaxResendRequests) count = kMaxResendRequests;
+
+    for (uint32_t i = 0; i < count; ++i) m_header->resendIds[i] = ids[i];
+
+    // Published last, with a release, so the producer cannot read a slot that
+    // has not been written yet.
+    ExchangeRelease32(&m_header->resendCount, count);
+}
+
+uint32_t SharedRing::TakeResendRequests(uint64_t* out, uint32_t max)
+{
+    if (!m_header || !out) return 0;
+
+    // Taking the count and clearing it in one operation means a request the
+    // consumer writes while this runs is either seen now or seen next frame,
+    // never dropped silently.
+    uint32_t count = ExchangeRelease32(&m_header->resendCount, 0);
+    if (count > kMaxResendRequests) count = kMaxResendRequests;
+    if (count > max) count = max;
+
+    for (uint32_t i = 0; i < count; ++i) out[i] = m_header->resendIds[i];
+    return count;
+}
 } // namespace SceneIPC

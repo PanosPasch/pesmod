@@ -93,6 +93,11 @@ namespace
     // Why draws were dropped. drawsSkipped alone hid the fact that the most
     // common vertex layout in the game was being rejected outright, so the
     // reasons are counted separately now.
+    // Geometry ids the host asked to have sent again. A steady non-zero
+    // rate means the host keeps losing geometry, which is worth knowing
+    // even though the mechanism now recovers on its own.
+    uint64_t g_resendHonoured = 0;
+
     uint64_t g_skippedLayout        = 0;   // no position at 0, or too small
     uint64_t g_skippedNoDeclaration = 0;   // shader created before the hook
 
@@ -844,6 +849,25 @@ void BeginFrame(uint64_t frameIndex, uint32_t width, uint32_t height)
     g_instancesThisFrame = 0;
     g_droppedThisFrame   = 0;
 
+    // ── Honour the host's resend requests ────────────────────────────────
+    // Anything the host was asked to draw but did not have is forgotten
+    // here, so the next draw that uses it sends it again. This is the only
+    // thing that makes the two caches agree; the retention windows on either
+    // side count different clocks and cannot (see RingHeader's resend
+    // table). Done before any draw this frame, so a request is served
+    // immediately rather than a frame late.
+    {
+        uint64_t wanted[SceneIPC::kMaxResendRequests];
+        const uint32_t n = g_ring.TakeResendRequests(wanted,
+                                                     SceneIPC::kMaxResendRequests);
+        for (uint32_t i = 0; i < n; ++i)
+        {
+            g_sentGeometry.erase(wanted[i]);
+            g_geometryLastUsed.erase(wanted[i]);
+        }
+        g_resendHonoured += n;
+    }
+
     FrameBegin fb;
     memset(&fb, 0, sizeof(fb));
     fb.frameIndex   = frameIndex;
@@ -899,6 +923,8 @@ void EndFrame()
     if (g_stats.framesSent && (g_stats.framesSent % kChurnReportInterval) == 0 &&
         (g_skippedLayout || g_skippedNoDeclaration))
     {
+        Logger::Log("[Export] resend requests honoured: %llu",
+            (unsigned long long)g_resendHonoured);
         Logger::Log("[Export] draws skipped: %llu unusable vertex layout, "
             "%llu with a declaration created before the hook",
             (unsigned long long)g_skippedLayout,
