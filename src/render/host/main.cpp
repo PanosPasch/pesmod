@@ -1064,6 +1064,10 @@ namespace
         if (st.skinnedRebuilds)
             printf("    skinned: %u structures rebuilt for a new pose\n",
                    st.skinnedRebuilds);
+        if (st.blasResized)
+            printf("    resized: %u structures recreated because the "
+                   "driver asked for more room than they were made with\n",
+                   st.blasResized);
     }
 
     void ReportSummary(const Host::SceneReceiver& rx)

@@ -205,6 +205,7 @@ void AccelBuilder::DestroyAccel(Accel& accel)
     }
     if (accel.storage.IsValid()) m_alloc->DestroyBuffer(accel.storage);
     accel.address = 0;
+    accel.size    = 0;
 }
 
 void AccelBuilder::Shutdown()
@@ -356,6 +357,17 @@ bool AccelBuilder::PrepareMeshBlas(const Geometry& geo, MeshBlas& out,
         m_device->Device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
         &job.build, &triangles, &sizes);
 
+    // The buffers can be reusable while the structure is not: the driver
+    // is free to ask for more room for the same triangle count when the
+    // vertex data moves, and building into a structure created for the
+    // old, smaller answer corrupts memory past its end.
+    if (out.accel.handle != VK_NULL_HANDLE &&
+        out.accel.size < sizes.accelerationStructureSize)
+    {
+        DestroyAccel(out.accel);
+        ++m_stats.blasResized;
+    }
+
     if (out.accel.handle == VK_NULL_HANDLE)
     {
         if (!m_alloc->CreateBuffer(sizes.accelerationStructureSize,
@@ -380,6 +392,7 @@ bool AccelBuilder::PrepareMeshBlas(const Geometry& geo, MeshBlas& out,
         ai.sType                 = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
         ai.accelerationStructure = out.accel.handle;
         out.accel.address = rt.GetAccelerationStructureDeviceAddress(m_device->Device(), &ai);
+        out.accel.size    = ci.size;
 
         m_stats.blasBytes += sizes.accelerationStructureSize;
     }
@@ -450,12 +463,18 @@ bool AccelBuilder::PrepareSpriteBlas(const std::vector<float>& positions,
         m_device->Device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
         &job.build, &triangles, &sizes);
 
+    // Against the structure's own size, not the buffer's. The buffer is
+    // half again as large so that a frame with a few more sprites does
+    // not reallocate; that headroom is only useful if the structure is
+    // created to span it, or every growth builds past the end of a
+    // structure the buffer was merely big enough to hold.
     if (m_spriteBlas.handle == VK_NULL_HANDLE ||
-        m_spriteBlas.storage.size < sizes.accelerationStructureSize)
+        m_spriteBlas.size < sizes.accelerationStructureSize)
     {
         DestroyAccel(m_spriteBlas);
-        if (!m_alloc->CreateBuffer(sizes.accelerationStructureSize +
-                                   sizes.accelerationStructureSize / 2,
+        const VkDeviceSize capacity = sizes.accelerationStructureSize +
+                                      sizes.accelerationStructureSize / 2;
+        if (!m_alloc->CreateBuffer(capacity,
                 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
                 false, m_spriteBlas.storage))
             return false;
@@ -463,7 +482,7 @@ bool AccelBuilder::PrepareSpriteBlas(const std::vector<float>& positions,
         VkAccelerationStructureCreateInfoKHR ci{};
         ci.sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
         ci.buffer = m_spriteBlas.storage.buffer;
-        ci.size   = sizes.accelerationStructureSize;
+        ci.size   = capacity;
         ci.type   = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
         if (rt.CreateAccelerationStructure(m_device->Device(), &ci, nullptr,
                                            &m_spriteBlas.handle) != VK_SUCCESS)
@@ -477,6 +496,7 @@ bool AccelBuilder::PrepareSpriteBlas(const std::vector<float>& positions,
         ai.accelerationStructure = m_spriteBlas.handle;
         m_spriteBlas.address = rt.GetAccelerationStructureDeviceAddress(
             m_device->Device(), &ai);
+        m_spriteBlas.size = ci.size;
     }
 
     job.build.dstAccelerationStructure = m_spriteBlas.handle;
@@ -533,12 +553,15 @@ bool AccelBuilder::PrepareTlas(
         m_device->Device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
         &job.build, &count, &sizes);
 
+    // See PrepareSpriteBlas: the headroom belongs to the structure, and
+    // the reuse test is against the structure rather than the buffer.
     if (m_tlas.handle == VK_NULL_HANDLE ||
-        m_tlas.storage.size < sizes.accelerationStructureSize)
+        m_tlas.size < sizes.accelerationStructureSize)
     {
         DestroyAccel(m_tlas);
-        if (!m_alloc->CreateBuffer(sizes.accelerationStructureSize +
-                                   sizes.accelerationStructureSize / 2,
+        const VkDeviceSize capacity = sizes.accelerationStructureSize +
+                                      sizes.accelerationStructureSize / 2;
+        if (!m_alloc->CreateBuffer(capacity,
                 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
                 false, m_tlas.storage))
             return false;
@@ -546,7 +569,7 @@ bool AccelBuilder::PrepareTlas(
         VkAccelerationStructureCreateInfoKHR ci{};
         ci.sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
         ci.buffer = m_tlas.storage.buffer;
-        ci.size   = sizes.accelerationStructureSize;
+        ci.size   = capacity;
         ci.type   = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
         if (rt.CreateAccelerationStructure(m_device->Device(), &ci, nullptr,
                                            &m_tlas.handle) != VK_SUCCESS)

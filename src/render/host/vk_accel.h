@@ -84,6 +84,12 @@ namespace Host
         uint32_t nonOccluding;          // skipped: drawn with depth writes off
         uint32_t skinnedRebuilds;       // structures rebuilt because the pose moved
 
+        // Structures thrown away and recreated because the driver asked
+        // for more room than the one already there. Expected to be small
+        // and occasional; a large number every frame would mean the reuse
+        // test is not reusing anything.
+        uint32_t blasResized;
+
         // Build jobs dropped because another job in the same batch already
         // targeted that structure. Building one destination twice in a single
         // command is undefined and takes the device with it, so this must
@@ -179,7 +185,15 @@ namespace Host
             VkDeviceAddress            address;
             GpuBuffer                  storage;
 
-            Accel() : handle(VK_NULL_HANDLE), address(0) {}
+            // The size the *structure* was created with, which is not
+            // the size of the buffer holding it: the buffer is
+            // deliberately over-allocated so a growing scene does not
+            // reallocate every frame. A build must never target a
+            // structure smaller than the size the driver asks for, so
+            // this is what the reuse test has to compare against.
+            VkDeviceSize               size;
+
+            Accel() : handle(VK_NULL_HANDLE), address(0), size(0) {}
         };
 
         // Keyed by geometry id for static meshes. A skinned mesh drawn more
