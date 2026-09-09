@@ -29,6 +29,7 @@ RayTracer::RayTracer()
     , m_setLayout(VK_NULL_HANDLE), m_descriptorPool(VK_NULL_HANDLE)
     , m_descriptorSet(VK_NULL_HANDLE), m_pipelineLayout(VK_NULL_HANDLE)
     , m_pipeline(VK_NULL_HANDLE)
+    , m_textureCapacity(0)
     , m_image(VK_NULL_HANDLE), m_imageMemory(VK_NULL_HANDLE)
     , m_imageView(VK_NULL_HANDLE), m_width(0), m_height(0)
 {
@@ -73,7 +74,7 @@ bool RayTracer::LoadShaderModule(const char* path, VkShaderModule& out)
 
 bool RayTracer::CreateDescriptors()
 {
-    VkDescriptorSetLayoutBinding bindings[3]{};
+    VkDescriptorSetLayoutBinding bindings[5]{};
     bindings[0].binding         = 0;
     bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     bindings[0].descriptorCount = 1;
@@ -92,9 +93,30 @@ bool RayTracer::CreateDescriptors()
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
                                   VK_SHADER_STAGE_MISS_BIT_KHR;
 
+    // The texture array: one entry per slot the cache can hold, all valid
+    // from the start because unused slots point at the white texture. A
+    // partially-bound array would work too, but a fully populated one cannot
+    // fault on a slot that has not arrived yet.
+    bindings[3].binding         = 3;
+    bindings[3].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[3].descriptorCount = m_textureCapacity;
+    // Every ray tracing stage, not just closest-hit. common.glsl is included
+    // by the miss shaders too, so its declarations appear in their SPIR-V
+    // interface whether or not they read them, and a stage missing from the
+    // layout is a mismatch rather than an unused binding.
+    const VkShaderStageFlags kRtStages = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
+                                         VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
+                                         VK_SHADER_STAGE_MISS_BIT_KHR;
+    bindings[3].stageFlags      = kRtStages;
+
+    bindings[4].binding         = 4;
+    bindings[4].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[4].descriptorCount = 1;
+    bindings[4].stageFlags      = kRtStages;
+
     VkDescriptorSetLayoutCreateInfo li{};
     li.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    li.bindingCount = 3;
+    li.bindingCount = 5;
     li.pBindings    = bindings;
     if (vkCreateDescriptorSetLayout(m_device->Device(), &li, nullptr,
                                     &m_setLayout) != VK_SUCCESS)
@@ -103,15 +125,20 @@ bool RayTracer::CreateDescriptors()
         return false;
     }
 
-    VkDescriptorPoolSize sizes[3]{};
+    // One pool entry per descriptor type in the layout; a type present in the
+    // layout but absent here fails allocation.
+    VkDescriptorPoolSize sizes[5]{};
     sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR; sizes[0].descriptorCount = 1;
     sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;              sizes[1].descriptorCount = 1;
     sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;             sizes[2].descriptorCount = 1;
+    sizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    sizes[3].descriptorCount = m_textureCapacity;
+    sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;             sizes[4].descriptorCount = 1;
 
     VkDescriptorPoolCreateInfo pi{};
     pi.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pi.maxSets       = 1;
-    pi.poolSizeCount = 3;
+    pi.poolSizeCount = 5;
     pi.pPoolSizes    = sizes;
     if (vkCreateDescriptorPool(m_device->Device(), &pi, nullptr,
                                &m_descriptorPool) != VK_SUCCESS)
@@ -351,11 +378,17 @@ void RayTracer::DestroyOutputImage()
 }
 
 bool RayTracer::Init(VulkanDevice* device, GpuAllocator* allocator,
-                     const char* shaderDir, uint32_t width, uint32_t height)
+                     const char* shaderDir, uint32_t width, uint32_t height,
+                     uint32_t textureCapacity)
 {
     m_device = device;
     m_alloc  = allocator;
     if (!device || !device->IsValid() || !allocator) return false;
+
+    // The array size is baked into the layout and the pool, so it cannot
+    // change later. One is the floor: a zero-length array is not a valid
+    // binding, and the white texture always occupies slot 0.
+    m_textureCapacity = textureCapacity ? textureCapacity : 1u;
 
     VkCommandPoolCreateInfo pi{};
     pi.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -382,7 +415,9 @@ bool RayTracer::Resize(uint32_t width, uint32_t height)
     return CreateOutputImage(width, height);
 }
 
-void RayTracer::UpdateDescriptors(VkAccelerationStructureKHR tlas)
+void RayTracer::UpdateDescriptors(VkAccelerationStructureKHR tlas,
+                                  const TextureCache* textures,
+                                  const GpuBuffer* instanceRecords)
 {
     VkWriteDescriptorSetAccelerationStructureKHR asInfo{};
     asInfo.sType                      = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
@@ -397,7 +432,7 @@ void RayTracer::UpdateDescriptors(VkAccelerationStructureKHR tlas)
     bufferInfo.buffer = m_uniforms.buffer;
     bufferInfo.range  = sizeof(SceneUniforms);
 
-    VkWriteDescriptorSet writes[3]{};
+    VkWriteDescriptorSet writes[5]{};
     writes[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].pNext           = &asInfo;
     writes[0].dstSet          = m_descriptorSet;
@@ -419,17 +454,49 @@ void RayTracer::UpdateDescriptors(VkAccelerationStructureKHR tlas)
     writes[2].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     writes[2].pBufferInfo     = &bufferInfo;
 
-    vkUpdateDescriptorSets(m_device->Device(), 3, writes, 0, nullptr);
+    uint32_t writeCount = 3;
+
+    // The texture array is rewritten whenever it may have changed, which is
+    // cheap next to the trace and avoids tracking a dirty flag across two
+    // objects that do not otherwise know about each other.
+    if (textures && textures->Capacity())
+    {
+        writes[writeCount].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[writeCount].dstSet          = m_descriptorSet;
+        writes[writeCount].dstBinding      = 3;
+        writes[writeCount].descriptorCount = textures->Capacity();
+        writes[writeCount].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[writeCount].pImageInfo      = textures->Descriptors().data();
+        ++writeCount;
+    }
+
+    VkDescriptorBufferInfo recordInfo{};
+    if (instanceRecords && instanceRecords->IsValid())
+    {
+        recordInfo.buffer = instanceRecords->buffer;
+        recordInfo.range  = VK_WHOLE_SIZE;
+
+        writes[writeCount].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[writeCount].dstSet          = m_descriptorSet;
+        writes[writeCount].dstBinding      = 4;
+        writes[writeCount].descriptorCount = 1;
+        writes[writeCount].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[writeCount].pBufferInfo     = &recordInfo;
+        ++writeCount;
+    }
+
+    vkUpdateDescriptorSets(m_device->Device(), writeCount, writes, 0, nullptr);
 }
 
-bool RayTracer::Trace(VkAccelerationStructureKHR tlas, const SceneUniforms& uniforms)
+bool RayTracer::Trace(VkAccelerationStructureKHR tlas, const SceneUniforms& uniforms,
+                      const TextureCache* textures, const GpuBuffer* instanceRecords)
 {
     if (tlas == VK_NULL_HANDLE) { m_lastError = "no TLAS to trace against"; return false; }
 
     const double started = NowMs();
 
     memcpy(m_uniforms.mapped, &uniforms, sizeof(uniforms));
-    UpdateDescriptors(tlas);
+    UpdateDescriptors(tlas, textures, instanceRecords);
 
     VkCommandBufferAllocateInfo cbai{};
     cbai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;

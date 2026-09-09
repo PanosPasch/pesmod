@@ -39,7 +39,8 @@ namespace
 
 AccelBuilder::AccelBuilder()
     : m_device(nullptr), m_alloc(nullptr), m_commandPool(VK_NULL_HANDLE)
-    , m_spriteCapacityBytes(0), m_tlasCapacityBytes(0), m_scratchCapacity(0)
+    , m_spriteCapacityBytes(0), m_tlasCapacityBytes(0)
+    , m_instanceRecordCapacity(0), m_instanceRecordCount(0), m_scratchCapacity(0)
     , m_haveVpHint(false), m_frameCounter(0)
 {
     memset(&m_stats, 0, sizeof(m_stats));
@@ -99,6 +100,7 @@ void AccelBuilder::Shutdown()
     if (m_spriteVertices.IsValid()) m_alloc->DestroyBuffer(m_spriteVertices);
     if (m_tlasInstances.IsValid())  m_alloc->DestroyBuffer(m_tlasInstances);
     if (m_scratch.IsValid())        m_alloc->DestroyBuffer(m_scratch);
+    if (m_instanceRecords.IsValid()) m_alloc->DestroyBuffer(m_instanceRecords);
 
     if (m_commandPool != VK_NULL_HANDLE)
     {
@@ -622,7 +624,8 @@ bool AccelBuilder::RecoverWorld(const InstanceDesc& inst,
     return Math::IsAffine(outWorld, 1e-2f);
 }
 
-bool AccelBuilder::BuildFrame(const SceneReceiver& scene)
+bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
+                              const TextureCache* textures)
 {
     const double started = NowMilliseconds();
 
@@ -649,6 +652,11 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene)
     // Sprite triangles are expanded to world space here and merged into one
     // structure; see the header for why they do not get individual BLASes.
     std::vector<float> spritePositions;
+
+    // One record per TLAS instance, in the same order, so
+    // gl_InstanceCustomIndexEXT indexes straight into it.
+    std::vector<InstanceRecord> records;
+    records.reserve(frame.instances.size());
 
     for (size_t i = 0; i < frame.instances.size(); ++i)
     {
@@ -724,9 +732,29 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene)
         }
         blas.lastUsedFrame = m_frameCounter;
 
+        // The record must be pushed with the instance, not with the scene
+        // draw: sprites and rejected instances leave gaps, so the scene index
+        // is not the TLAS index.
+        InstanceRecord rec;
+        memset(&rec, 0, sizeof(rec));
+        rec.vertexAddress = blas.vertices.address;
+        rec.indexAddress  = blas.indices.IsValid() ? blas.indices.address : 0;
+        rec.vertexStride  = geo->desc.vertexStride;
+        rec.indexStride   = geo->desc.indexCount ? geo->desc.indexStride : 0;
+
+        // Where the float2 UV sits inside a vertex. Both of the game's
+        // layouts end with it; only what precedes it differs — a packed
+        // colour in the pre-lit layout, a normal in the lit one.
+        rec.uvOffset = (geo->desc.vertexKind == SceneIPC::kVertexLit) ? 24u : 16u;
+
+        rec.textureSlot = textures ? textures->Slot(inst.baseTextureId)
+                                   : kWhiteTextureSlot;
+        memcpy(rec.baseColor, inst.baseColorFactor, sizeof(rec.baseColor));
+
         VkAccelerationStructureInstanceKHR out{};
         Math::ToVkTransform(world, &out.transform.matrix[0][0]);
-        out.instanceCustomIndex                    = (uint32_t)i & 0xFFFFFF;
+        out.instanceCustomIndex                    = (uint32_t)records.size() & 0xFFFFFF;
+        records.push_back(rec);
         out.mask                                   = 0xFF;
         out.instanceShaderBindingTableRecordOffset = 0;
         out.flags = (inst.flags & kInstanceTwoSided)
@@ -749,12 +777,46 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene)
     }
     if (haveSprites && m_spriteBlas.handle != VK_NULL_HANDLE)
     {
+        // The merged sprite BLAS has no per-sprite identity left: its
+        // triangles came from many draws and were baked into world space
+        // together. One record covers the batch, untextured, until sprites
+        // carry their own UVs and materials through the merge.
+        InstanceRecord rec;
+        memset(&rec, 0, sizeof(rec));
+        rec.textureSlot = kWhiteTextureSlot;
+        rec.baseColor[0] = rec.baseColor[1] = rec.baseColor[2] = rec.baseColor[3] = 1.0f;
+
         VkAccelerationStructureInstanceKHR out{};
         Math::ToVkTransform(Math::Identity(), &out.transform.matrix[0][0]);
+        out.instanceCustomIndex = (uint32_t)records.size() & 0xFFFFFF;
+        records.push_back(rec);
         out.mask  = 0xFF;
         out.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
         out.accelerationStructureReference = m_spriteBlas.address;
         tlasInstances.push_back(out);
+    }
+
+    // Records go up before the submit, so they describe the same frame the
+    // structures do. Host-visible: this is rewritten every frame and is far
+    // too small to be worth a staging copy and a queue wait.
+    m_instanceRecordCount = (uint32_t)records.size();
+    if (!records.empty())
+    {
+        const VkDeviceSize bytes = records.size() * sizeof(InstanceRecord);
+        if (!m_instanceRecords.IsValid() || m_instanceRecordCapacity < bytes)
+        {
+            if (m_instanceRecords.IsValid()) m_alloc->DestroyBuffer(m_instanceRecords);
+            const VkDeviceSize capacity = bytes + bytes / 2 + 4096;
+            if (!m_alloc->CreateBuffer(capacity, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                       true, m_instanceRecords))
+            {
+                m_lastError = "instance record buffer allocation failed: " +
+                              m_alloc->LastError();
+                return false;
+            }
+            m_instanceRecordCapacity = capacity;
+        }
+        memcpy(m_instanceRecords.mapped, records.data(), (size_t)bytes);
     }
 
     PendingBuild tlasJob;

@@ -65,6 +65,11 @@ namespace Host
         uint32_t BlockCount()     const { return (uint32_t)m_blocks.size(); }
         uint32_t LiveAllocations() const { return m_liveAllocations; }
 
+        // Public because images allocate their own memory - the block
+        // sub-allocator here is for buffers - and still need this lookup.
+        // Returns -1 if no memory type satisfies `props`.
+        int FindMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const;
+
         const std::string& LastError() const { return m_lastError; }
 
     private:
@@ -79,7 +84,7 @@ namespace Host
             std::vector<FreeRange> freeList;
         };
 
-        int  FindMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const;
+
         bool AllocateFrom(uint32_t memoryTypeIndex, VkDeviceSize size,
                           VkDeviceSize alignment, bool hostVisible,
                           uint32_t& outBlock, VkDeviceSize& outOffset,

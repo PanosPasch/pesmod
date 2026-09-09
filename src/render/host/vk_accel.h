@@ -36,6 +36,7 @@
 #include "scene_receiver.h"
 #include "scene_math.h"
 #include "vk_alloc.h"
+#include "vk_textures.h"
 #include "vk_device.h"
 
 #include <unordered_map>
@@ -80,7 +81,10 @@ namespace Host
         // Rebuilds the acceleration structures for one frame of scene data.
         // Returns false only on an unrecoverable Vulkan error; a frame with
         // no usable geometry succeeds with an empty TLAS.
-        bool BuildFrame(const SceneReceiver& scene);
+        // `textures` may be null, in which case every record points at the
+        // white slot and the scene renders untextured.
+        bool BuildFrame(const SceneReceiver& scene,
+                        const TextureCache* textures = nullptr);
 
         VkAccelerationStructureKHR Tlas() const { return m_tlas.handle; }
         const AccelStats& Stats() const { return m_stats; }
@@ -92,8 +96,42 @@ namespace Host
         const Math::Mat4& InverseViewProj() const { return m_lastInverseVp; }
         const std::string& LastError() const { return m_lastError; }
 
+        // Per-TLAS-instance data for the hit shader, in the same order as
+        // the TLAS instances themselves. Empty until BuildFrame runs.
+        const GpuBuffer& InstanceRecords() const { return m_instanceRecords; }
+        uint32_t InstanceRecordCount() const { return m_instanceRecordCount; }
+
         // Drops persistent structures whose geometry is no longer resident.
         void PruneOrphans(const SceneReceiver& scene);
+
+    public:
+        // What the hit shader needs to shade a surface it did not know it
+        // would hit.
+        //
+        // A rasteriser binds a texture and a vertex layout before each draw.
+        // A ray tracer cannot: the surface is only known once the ray lands.
+        // So every instance publishes where its data is and what it is made
+        // of, and the hit shader looks that up through
+        // gl_InstanceCustomIndexEXT.
+        //
+        // Mirrors InstanceRecord in shaders/common.glsl. Laid out so std430
+        // and C++ agree without padding surprises; asserted below.
+        struct InstanceRecord
+        {
+            uint64_t vertexAddress;
+            uint64_t indexAddress;
+            uint32_t vertexStride;
+            uint32_t uvOffset;      // bytes into a vertex, to its float2 UV
+            uint32_t indexStride;   // 2 or 4; 0 means non-indexed
+            uint32_t textureSlot;
+            float    baseColor[4];
+        };
+
+        static_assert(sizeof(InstanceRecord) == 48,
+                      "InstanceRecord must match its std430 layout in "
+                      "shaders/common.glsl");
+        static_assert(offsetof(InstanceRecord, baseColor) == 32,
+                      "vec4 is 16-byte aligned in std430");
 
     private:
         struct Accel
@@ -185,6 +223,10 @@ namespace Host
         Accel      m_tlas;
         GpuBuffer  m_tlasInstances;
         VkDeviceSize m_tlasCapacityBytes;
+
+        GpuBuffer    m_instanceRecords;
+        VkDeviceSize m_instanceRecordCapacity;
+        uint32_t     m_instanceRecordCount;
 
         GpuBuffer    m_scratch;
         VkDeviceSize m_scratchCapacity;

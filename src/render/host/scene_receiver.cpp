@@ -58,6 +58,24 @@ const Texture* SceneReceiver::FindTexture(uint64_t id) const
     return (it == m_textures.end()) ? nullptr : &it->second;
 }
 
+void SceneReceiver::CollectDirtyTextures(std::vector<uint64_t>& out,
+                                         uint32_t max) const
+{
+    out.clear();
+    for (auto it = m_textures.begin(); it != m_textures.end(); ++it)
+    {
+        if (!it->second.dirty || it->second.pixels.empty()) continue;
+        out.push_back(it->first);
+        if (out.size() >= max) break;
+    }
+}
+
+void SceneReceiver::MarkTextureClean(uint64_t textureId)
+{
+    auto it = m_textures.find(textureId);
+    if (it != m_textures.end()) it->second.dirty = false;
+}
+
 void SceneReceiver::HandleMessage(const uint8_t* msg, uint32_t bytes)
 {
     const MessageHeader* mh = (const MessageHeader*)msg;

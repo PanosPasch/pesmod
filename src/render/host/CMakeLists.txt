@@ -35,6 +35,7 @@ set(HOST_SOURCES
     vk_alloc.cpp
     vk_accel.cpp
     vk_raytracer.cpp
+    vk_textures.cpp
     image_write.cpp
     ../ipc/shared_ring.cpp
 )

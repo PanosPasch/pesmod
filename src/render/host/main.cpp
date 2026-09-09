@@ -17,11 +17,13 @@
 #include "vk_alloc.h"
 #include "vk_accel.h"
 #include "vk_raytracer.h"
+#include "vk_textures.h"
 
 #include <windows.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -58,6 +60,7 @@ namespace
             "  --trace-height <n> traced image height; the width follows the\n"
             "                     game aspect ratio (default 720, 0 = off)\n"
             "  --save-frame <n>   write the nth traced frame to disk\n"
+            "  --texture-budget <n>  texture uploads per frame (default 8)\n"
             "  --save-every <n>   write every nth traced frame, numbered\n"
             "  --save-path <file> where to write it (default traced_frame.png;\n"
             "                     a .ppm extension writes a PPM instead)\n"
@@ -223,6 +226,32 @@ namespace
                               payload.data(), (uint32_t)payload.size(), false);
         }
 
+        // A solid-colour texture. Solid rather than patterned because the
+        // check below has to hold for whichever texel the UVs land on: if
+        // sampling works at all, the surface takes this hue.
+        const uint64_t kTestTextureId = 0x7777777700000003ull;
+        const float    kTestRgb[3]    = { 0.20f, 0.60f, 0.90f };
+        {
+            SceneIPC::TextureDesc td{};
+            td.textureId    = kTestTextureId;
+            td.format       = SceneIPC::kTexBGRA8;
+            td.width        = 4;
+            td.height       = 4;
+            td.mipLevels    = 1;
+            td.payloadBytes = 4 * 4 * 4;
+
+            std::vector<uint8_t> texels(td.payloadBytes);
+            for (uint32_t i = 0; i < td.payloadBytes; i += 4)
+            {
+                texels[i + 0] = (uint8_t)(kTestRgb[2] * 255.0f + 0.5f);   // B
+                texels[i + 1] = (uint8_t)(kTestRgb[1] * 255.0f + 0.5f);   // G
+                texels[i + 2] = (uint8_t)(kTestRgb[0] * 255.0f + 0.5f);   // R
+                texels[i + 3] = 255;
+            }
+            producer.TryWrite(SceneIPC::kMsgTexture, &td, sizeof(td),
+                              texels.data(), td.payloadBytes, false);
+        }
+
         // Reproduces the failure seen against the real game: the view and
         // projection reported via SetTransform are NOT the ones the shaders
         // used, so the naive factorisation rejects almost every instance.
@@ -259,6 +288,7 @@ namespace
 
             SceneIPC::InstanceDesc inst{};
             inst.geometryId    = ids[i];
+            inst.baseTextureId = kTestTextureId;
             inst.clipTransform = Host::Math::Multiply(world, trueVp);
             inst.baseColorFactor[0] = inst.baseColorFactor[1] =
             inst.baseColorFactor[2] = inst.baseColorFactor[3] = 1.0f;
@@ -281,13 +311,21 @@ namespace
 
         Host::GpuAllocator alloc;
         Host::AccelBuilder accel;
+        Host::TextureCache textures;
         if (!alloc.Init(&gpu) || !accel.Init(&gpu, &alloc))
         {
             printf("FAIL: %s\n", accel.LastError().c_str());
             return 1;
         }
 
-        if (!accel.BuildFrame(rx))
+        if (!textures.Init(&gpu, &alloc))
+        {
+            printf("FAIL: texture cache - %s\n", textures.LastError().c_str());
+            return 1;
+        }
+        textures.Sync(rx, 64);
+
+        if (!accel.BuildFrame(rx, &textures))
         {
             printf("FAIL: BuildFrame - %s\n", accel.LastError().c_str());
             return 1;
@@ -326,7 +364,7 @@ namespace
         // about whether rays actually hit them, so the scene is traced and the
         // resulting image is written out.
         Host::RayTracer tracer;
-        if (!tracer.Init(&gpu, &alloc, shaderDir, 256, 256))
+        if (!tracer.Init(&gpu, &alloc, shaderDir, 256, 256, textures.Capacity()))
         {
             printf("  [FAIL] ray tracer init: %s\n", tracer.LastError().c_str());
             ++failures;
@@ -360,7 +398,8 @@ namespace
             u.params[0] = 1000.0f;   // shadow ray length
             u.params[1] = 1.0f;      // exposure
 
-            if (!tracer.Trace(accel.Tlas(), u))
+            if (!tracer.Trace(accel.Tlas(), u, &textures,
+                              &accel.InstanceRecords()))
             {
                 printf("  [FAIL] trace: %s\n", tracer.LastError().c_str());
                 ++failures;
@@ -420,6 +459,40 @@ namespace
                     // coverage count would ever notice.
                     check(differing > 0 && inTopHalf == differing,
                           "image is the right way up");
+
+                    // Did the texture actually reach the surface?
+                    //
+                    // Counted per pixel rather than averaged: the merged
+                    // sprite batch is deliberately untextured and covers
+                    // five times the area of the textured mesh, so a mean
+                    // over the whole frame sits near white either way.
+                    //
+                    // Lighting scales every channel by roughly the same
+                    // amount, so the ratio between channels survives it:
+                    // blue/red is 4.5 for this texture and 1.0 for the white
+                    // fallback, which no near-miss can confuse.
+                    const double want = kTestRgb[2] / kTestRgb[0];
+                    size_t textured = 0;
+                    for (int y = 0; y < h; ++y)
+                        for (int x = 0; x < w; ++x)
+                        {
+                            const size_t i = ((size_t)y * w + x) * 3;
+                            if (px[i] == bg[0] && px[i+1] == bg[1] &&
+                                px[i+2] == bg[2]) continue;
+                            // Undo the gamma encode before comparing.
+                            const double r = pow(px[i + 0] / 255.0, 2.2);
+                            const double b = pow(px[i + 2] / 255.0, 2.2);
+                            if (r < 1e-6) continue;
+                            const double ratio = b / r;
+                            if (ratio > want * 0.85 && ratio < want * 1.15)
+                                ++textured;
+                        }
+
+                    check(textured >= 100,
+                          "the textured instance sampled its own texture, "
+                          "not the white fallback");
+                    printf("  %zu pixels carry the texture's blue/red of %.1f\n",
+                           textured, want);
                     printf("  geometry covers %.1f%% of the frame "
                            "(%.0f%% of it above the midline); "
                            "background rgb(%u,%u,%u)\n",
@@ -434,7 +507,7 @@ namespace
             }
         }
         tracer.Shutdown();
-
+        textures.Shutdown();
         accel.Shutdown();
         alloc.Shutdown();
         printf("%s\n", failures == 0 ? "ALL CHECKS PASSED" : "FAILURES PRESENT");
@@ -517,6 +590,10 @@ int main(int argc, char** argv)
     uint32_t    traceHeight = 720;
     uint64_t    saveFrame = 0;             // 1-based; 0 = never save
     uint64_t    saveEvery = 0;             // 0 = off
+    // Each upload stalls on a queue wait, so a frame bringing in a hundred
+    // new textures would hitch badly. The rest arrive over the following
+    // frames, and their surfaces sample white until they do.
+    uint32_t    textureBudget = 8;
     const char* savePath = "traced_frame.png";
 
     for (int i = 1; i < argc; ++i)
@@ -536,6 +613,8 @@ int main(int argc, char** argv)
             saveFrame = strtoull(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--save-every") && i + 1 < argc)
             saveEvery = strtoull(argv[++i], nullptr, 10);
+        else if (!strcmp(argv[i], "--texture-budget") && i + 1 < argc)
+            textureBudget = (uint32_t)strtoul(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--save-path") && i + 1 < argc) savePath = argv[++i];
         else if (!strcmp(argv[i], "--no-validation")) validation = false;
         else if (!strcmp(argv[i], "--help")) { PrintUsage(); return 0; }
@@ -580,6 +659,14 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    Host::TextureCache textures;
+    if (!textures.Init(&gpu, &alloc))
+    {
+        printf("FATAL: texture cache init failed: %s\n",
+               textures.LastError().c_str());
+        return 1;
+    }
+
     // Created here but initialised on the first frame: the traced image has
     // to match the game aspect ratio, which is not known until a frame
     // arrives carrying its render size.
@@ -621,7 +708,12 @@ int main(int argc, char** argv)
             accel.PruneOrphans(rx);
         }
 
-        if (!accel.BuildFrame(rx))
+        // Textures first: the builder records the slot each instance will
+        // sample, so one arriving after the record is written would not be
+        // seen until the next frame.
+        textures.Sync(rx, textureBudget);
+
+        if (!accel.BuildFrame(rx, &textures))
         {
             printf("FATAL: acceleration structure build failed: %s\n",
                    accel.LastError().c_str());
@@ -640,7 +732,8 @@ int main(int argc, char** argv)
             const uint32_t srcH = fb.renderHeight ? fb.renderHeight : 480;
             const uint32_t w = (uint32_t)((double)traceHeight * srcW / srcH + 0.5);
 
-            if (tracer.Init(&gpu, &alloc, shaderDir, w, traceHeight))
+            if (tracer.Init(&gpu, &alloc, shaderDir, w, traceHeight,
+                            textures.Capacity()))
                 printf("ray tracer ready: %ux%u (game renders %ux%u)\n\n",
                        w, traceHeight, srcW, srcH);
             else
@@ -687,7 +780,8 @@ int main(int argc, char** argv)
             u.params[0] = 20000.0f;   // shadow ray length, in the game's units
             u.params[1] = 1.0f;
 
-            if (tracer.Trace(accel.Tlas(), u))
+            if (tracer.Trace(accel.Tlas(), u, &textures,
+                             &accel.InstanceRecords()))
             {
                 const uint64_t n = reported + 1;
                 if ((saveFrame && n == saveFrame) ||
@@ -726,6 +820,7 @@ int main(int argc, char** argv)
     // Explicit, and in reverse order of creation: the tracer holds descriptors
     // naming the builder TLAS, and both draw memory from the allocator.
     tracer.Shutdown();
+    textures.Shutdown();
     accel.Shutdown();
     alloc.Shutdown();
     return 0;

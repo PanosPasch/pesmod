@@ -23,6 +23,7 @@
 #include "vk_accel.h"
 #include "vk_alloc.h"
 #include "vk_device.h"
+#include "vk_textures.h"
 
 #include <string>
 #include <vector>
@@ -59,14 +60,21 @@ namespace Host
         ~RayTracer();
 
         // `shaderDir` holds the compiled .spv files produced by the build.
+        // `textureCapacity` must match the cache's, because the array size
+        // is fixed in the descriptor layout and cannot grow afterwards.
         bool Init(VulkanDevice* device, GpuAllocator* allocator,
-                  const char* shaderDir, uint32_t width, uint32_t height);
+                  const char* shaderDir, uint32_t width, uint32_t height,
+                  uint32_t textureCapacity = 1);
         void Shutdown();
 
         bool Resize(uint32_t width, uint32_t height);
 
         // Traces one frame against `tlas`. Returns false on a Vulkan error.
-        bool Trace(VkAccelerationStructureKHR tlas, const SceneUniforms& uniforms);
+        // `textures` and `instanceRecords` may be null; the hit shader then
+        // samples the white slot and shades with the base colour alone.
+        bool Trace(VkAccelerationStructureKHR tlas, const SceneUniforms& uniforms,
+                   const TextureCache* textures = nullptr,
+                   const GpuBuffer* instanceRecords = nullptr);
 
         // Reads the output image back and writes a binary PPM. Slow — it
         // stalls on a queue wait — so it is for inspection and tests, not
@@ -91,11 +99,18 @@ namespace Host
         bool CreateOutputImage(uint32_t width, uint32_t height);
         void DestroyOutputImage();
         bool CreateDescriptors();
-        void UpdateDescriptors(VkAccelerationStructureKHR tlas);
+        void UpdateDescriptors(VkAccelerationStructureKHR tlas,
+                               const TextureCache* textures,
+                               const GpuBuffer* instanceRecords);
 
         VulkanDevice* m_device;
         GpuAllocator* m_alloc;
         VkCommandPool m_commandPool;
+
+        // Fixed at Init and matched by the descriptor pool, the layout and
+        // every array write, so it lives here rather than being asked of the
+        // cache each time.
+        uint32_t m_textureCapacity;
 
         VkDescriptorSetLayout m_setLayout;
         VkDescriptorPool      m_descriptorPool;

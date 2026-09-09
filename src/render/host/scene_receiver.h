@@ -120,6 +120,13 @@ namespace Host
         uint64_t ProducerFramesDropped() const;
         uint64_t ProducerBytesDropped() const;
 
+        // Textures that have arrived or changed and are not yet on the GPU.
+        // Collecting and clearing are separate calls so a failed upload
+        // leaves the texture dirty and it is retried, rather than being
+        // dropped because it was marked clean optimistically.
+        void CollectDirtyTextures(std::vector<uint64_t>& out, uint32_t max) const;
+        void MarkTextureClean(uint64_t textureId);
+
     private:
         void HandleMessage(const uint8_t* msg, uint32_t bytes);
 
