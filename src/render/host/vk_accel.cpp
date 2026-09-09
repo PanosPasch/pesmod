@@ -966,10 +966,37 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
         const uint32_t triangles = TriangleCountOf(*geo);
         if (triangles == 0) continue;
 
-        // The sky is the one non-occluding draw that cannot simply be let in:
-        // its box contains the camera, so a primary ray would hit it before
-        // anything else. It goes in on its own mask instead, where only the
-        // miss path can see it.
+        // ── Backdrop, or decal? ──────────────────────────────────────────
+        //
+        // "Must not occlude" covers two quite different things, and letting
+        // them in together painted the stadium out.
+        //
+        // A non-occluding draw that is *blended* is a decal: it composites
+        // over what it decorates, which is what the pitch's wear and
+        // markings and the projected shadows are, and it belongs in the
+        // scene on kMaskNonOccluding.
+        //
+        // A non-occluding draw that is *opaque* cannot be a decal - a
+        // surface that composites has to be blended - so it is a backdrop.
+        // This game paints its sky first, with depth writes off, and then
+        // draws the stadium over the top; those draws are the second and
+        // third of the frame. The ray traced equivalent of "painted first
+        // and never writes depth" is "behind everything", which is exactly
+        // what kMaskSky is: consulted only once a primary ray has found
+        // nothing else.
+        //
+        // The enclosure test stays as well, because a backdrop that wraps
+        // the camera is a backdrop whatever its material - but on its own it
+        // could only ever catch the sky drawn as a box. This stadium draws
+        // it as flat planes, which enclose nothing and came out as a white
+        // polygon over the roof.
+        // Only the draw whose bounds contain the camera. Treating every
+        // non-occluding *opaque* draw as a backdrop was tried and measured
+        // wrong: it lightened the pitch from rgb(128,134,106) to
+        // rgb(157,173,138) against the game's own rgb(76,95,51), because
+        // some of what it swept out of the scene are opaque layers that
+        // genuinely darken the pitch. "Opaque and told not to occlude" is
+        // not the same statement as "backdrop", and this game makes both.
         const bool isSky = nonOccluding && EnclosesCamera(*geo, world);
         if (isSky) ++m_stats.skyDraws;
 
@@ -995,7 +1022,7 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
             memset(&mat, 0, sizeof(mat));
             mat.textureSlot  = textures ? textures->Slot(inst.baseTextureId)
                                         : kWhiteTextureSlot;
-            mat.samplerIndex = SamplerIndexForAddress(inst.textureAddress);
+            mat.samplerIndex = SamplerIndexForAddress(inst.stageState);
             mat.flags = (inst.flags & (kInstanceAlphaBlend | kInstanceAlphaTest))
                       ? kRecordBlended : 0u;
             memcpy(mat.baseColor, inst.baseColorFactor, sizeof(mat.baseColor));
@@ -1117,12 +1144,29 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
         // positions, so this offset is valid for a posed mesh too.
         rec.normalOffset = geo->desc.normalOffset;
 
+        // Untouched by the palette, which rewrites only position and normal
+        // and copies the rest of the vertex through.
+        rec.colorOffset = geo->desc.colorOffset;
+
         rec.textureSlot  = textures ? textures->Slot(inst.baseTextureId)
                                     : kWhiteTextureSlot;
-        rec.samplerIndex = SamplerIndexForAddress(inst.textureAddress);
+        rec.samplerIndex = SamplerIndexForAddress(inst.stageState);
         rec.flags = (inst.flags & (kInstanceAlphaBlend | kInstanceAlphaTest))
                   ? kRecordBlended : 0u;
         if (isSky) rec.flags |= kRecordUnlit;
+
+        // Where the coverage of a blended surface comes from: the draw's own
+        // alpha op says, and nothing else can. Guessing it from whether the
+        // texture had alpha of its own was measurably wrong - the pitch grass
+        // is a blended draw with an opaque texture, so the guess folded its
+        // vertex alpha in and lightened the pitch from rgb(129,134,106) to
+        // rgb(157,173,138) against the game's own rgb(76,95,51).
+        if ((rec.flags & kRecordBlended) != 0u &&
+            VertexAlphaContributes(inst.stageState))
+        {
+            rec.flags |= kRecordVertexAlpha;
+            ++m_stats.vertexAlphaDraws;
+        }
         memcpy(rec.baseColor, inst.baseColorFactor, sizeof(rec.baseColor));
 
         // ── Coplanar decals: separate them by draw order ─────────────────
@@ -1211,6 +1255,7 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
         rec.samplerIndex = 0;
         rec.uvOffset     = SceneIPC::kNoVertexAttribute;
         rec.normalOffset = SceneIPC::kNoVertexAttribute;
+        rec.colorOffset  = SceneIPC::kNoVertexAttribute;
         rec.flags        = kRecordSpriteBatch;
         rec.baseColor[0] = rec.baseColor[1] = rec.baseColor[2] = rec.baseColor[3] = 1.0f;
 

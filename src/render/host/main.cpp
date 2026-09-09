@@ -1473,6 +1473,9 @@ namespace
         if (st.skinnedRebuilds)
             printf("    skinned: %u structures rebuilt for a new pose\n",
                    st.skinnedRebuilds);
+        if (st.vertexAlphaDraws)
+            printf("    coverage: %u blended draws take alpha from the "
+                   "vertex colour\n", st.vertexAlphaDraws);
         if (st.blasResized)
             printf("    resized: %u structures recreated because the "
                    "driver asked for more room than they were made with\n",
@@ -1508,8 +1511,8 @@ namespace
         printf("  textures not shown   %u undecodable, %u past capacity\n",
                ts.skippedFormat, ts.skippedFull);
         printf("  textures adjusted    %u X8 forced opaque, "
-               "%u fully transparent\n",
-               ts.opaqueForced, ts.fullyTransparent);
+               "%u fully transparent, %u opaque everywhere\n",
+               ts.opaqueForced, ts.fullyTransparent, ts.opaqueAlpha);
         printf("  malformed messages   %llu\n",
                (unsigned long long)s.malformedMessages);
         printf("  producer dropped     %llu frames / %.1f MB\n",

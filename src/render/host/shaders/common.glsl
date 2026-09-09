@@ -60,7 +60,7 @@ struct InstanceRecord
     uint     samplerIndex;   // addressing belongs to the draw, not the image
     uint     flags;          // kRecordBlended
     uint     normalOffset;   // bytes to the float3 normal, or kNoVertexAttribute
-    uint     _pad1;
+    uint     colorOffset;    // bytes to the D3DCOLOR diffuse, or kNoVertexAttribute
 };
 
 // ── Ray masks ────────────────────────────────────────────────────────────
@@ -87,6 +87,10 @@ const uint kRecordSpriteBatch = 2u;
 // The sky is a pre-lit texture, so running the stadium's light over it would
 // light the thing that is the light.
 const uint kRecordUnlit       = 4u;
+
+// Coverage comes from the vertex colour's alpha as well as the texture's.
+// Set by the builder only where the texture has no alpha of its own.
+const uint kRecordVertexAlpha = 8u;
 
 // ── The primary ray payload ──────────────────────────────────────────────
 //
@@ -212,6 +216,11 @@ vec4 SampleSprite(SpriteTriangle spr, vec2 uv)
                       uv, 0.0);
 }
 
+// Matches SceneIPC::kNoVertexAttribute: the offset a geometry reports for an
+// attribute it does not have. Declared here because every vertex helper
+// below tests against it.
+const uint kNoVertexAttribute = 0xFFFFFFFFu;
+
 // Vertex and index data is read through device addresses rather than bound
 // buffers, because there is no "current mesh" at hit time — the record says
 // where to look.
@@ -244,6 +253,21 @@ vec3 VertexNormal(FloatData verts, uint stride, uint normalOffset, uint index)
     return vec3(verts.v[base], verts.v[base + 1u], verts.v[base + 2u]);
 }
 
+// The alpha of a vertex's D3DCOLOR diffuse.
+//
+// D3DCOLOR is 0xAARRGGBB, and every colorOffset the game uses is a multiple
+// of four, so the whole thing is one word and the top byte is the alpha.
+//
+// Only the alpha is read. The game modulates texture by vertex colour, so a
+// blended surface's coverage is the product of the two; its RGB on this
+// layout is the game's own baked lighting, which this renderer replaces
+// rather than reuses.
+float VertexAlpha(WordData verts, uint stride, uint colorOffset, uint index)
+{
+    const uint word = verts.v[(index * stride + colorOffset) >> 2u];
+    return float(word >> 24u) * (1.0 / 255.0);
+}
+
 // The three corner indices of the triangle that was hit. Non-indexed
 // geometry numbers its vertices straight through.
 uvec3 HitTriangle(InstanceRecord rec, uint primitiveID)
@@ -255,6 +279,21 @@ uvec3 HitTriangle(InstanceRecord rec, uint primitiveID)
     return uvec3(IndexAt(idx, rec.indexStride, base),
                  IndexAt(idx, rec.indexStride, base + 1u),
                  IndexAt(idx, rec.indexStride, base + 2u));
+}
+
+// The interpolated vertex alpha at a hit, or 1 where there is none. Shared
+// by the closest-hit and any-hit shaders for the same reason HitUv is: the
+// alpha test and the shading must not disagree about how covered a surface
+// is.
+float HitVertexAlpha(InstanceRecord rec, uvec3 tri, vec3 bary)
+{
+    if (rec.vertexAddress == 0ul || rec.colorOffset == kNoVertexAttribute)
+        return 1.0;
+
+    WordData verts = WordData(rec.vertexAddress);
+    return bary.x * VertexAlpha(verts, rec.vertexStride, rec.colorOffset, tri.x)
+         + bary.y * VertexAlpha(verts, rec.vertexStride, rec.colorOffset, tri.y)
+         + bary.z * VertexAlpha(verts, rec.vertexStride, rec.colorOffset, tri.z);
 }
 
 // The interpolated UV at a triangle hit. Shared by the closest-hit and
@@ -288,15 +327,11 @@ vec2 HitUv(InstanceRecord rec, uint primitiveID, vec2 bary2)
 }
 
 // Below this a texel is treated as absent rather than composited. It is
-// deliberately near zero: partial alpha is now composited by the ray
-// generation rather than tested away, and the only thing worth rejecting
-// outright is a texel that would contribute nothing while consuming one of
-// the peeling layers. Of the game's seven coplanar pitch layers, two are
-// entirely below this.
-// Matches SceneIPC::kNoVertexAttribute: the offset a geometry reports for
-// an attribute it does not have.
-const uint kNoVertexAttribute = 0xFFFFFFFFu;
-
+// deliberately near zero: partial alpha is composited by the ray generation
+// rather than tested away, and the only thing worth rejecting outright is a
+// texel that would contribute nothing while consuming one of the peeling
+// layers. Of the game's seven coplanar pitch layers, two are entirely below
+// this.
 const float kAlphaEpsilon = 1.0 / 255.0;
 
 // Unprojects a point on the near or far plane back into world space.

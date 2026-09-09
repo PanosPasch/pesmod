@@ -63,6 +63,11 @@ namespace Host
     // Maps a packed D3DTSS_ADDRESSU/V pair, as InstanceDesc carries it, to
     // one of those. Zero - the producer not having reported it - means the
     // Direct3D default, which is wrap.
+    // Whether a blended draw takes coverage from the vertex colour as
+    // well as the texture. Reads InstanceDesc::stageState, whose alpha op
+    // is the only thing that actually knows.
+    bool VertexAlphaContributes(uint32_t packedStage);
+
     uint32_t SamplerIndexForAddress(uint32_t packedAddress);
 
     // Decodes one mip of one texture into B8G8R8A8, and how many source
@@ -88,6 +93,7 @@ namespace Host
         // recording to notice.
         uint32_t skippedFormat;     // nothing here can decode it
         uint32_t skippedFull;       // cache is at capacity
+        uint32_t opaqueAlpha;       // alpha is 255 everywhere: no coverage
         uint32_t opaqueForced;      // X8R8G8B8: alpha byte is not alpha
         uint32_t fullyTransparent;  // alpha zero everywhere; drawn as nothing
         uint64_t bytesResident;
@@ -111,6 +117,12 @@ namespace Host
         // The array index for a texture id, or kWhiteTextureSlot if it is not
         // resident (yet, or ever).
         uint32_t Slot(uint64_t textureId) const;
+
+        // Whether this texture's alpha channel is 255 everywhere, so it
+        // says nothing about coverage. Reported, not acted on: which of the
+        // texture and the vertex colour supplies alpha is the draw's alpha
+        // op, and InstanceDesc::stageState carries it.
+        bool TextureCarriesAlpha(uint64_t textureId) const;
 
         // Sized to capacity, not to what is resident: a descriptor array must
         // be fully populated, so unused entries point at the white texture.
@@ -152,6 +164,12 @@ namespace Host
 
         std::vector<Image>                     m_images;
         std::unordered_map<uint64_t, uint32_t> m_slotOf;
+
+        // Texture ids whose alpha channel is 255 everywhere.
+        std::unordered_map<uint64_t, bool> m_carriesAlpha;
+
+        // Set by the last UploadImage, read by Sync once it succeeds.
+        bool m_lastUploadCarriesAlpha;
         std::vector<VkDescriptorImageInfo>     m_descriptors;
 
         TextureStats m_stats;

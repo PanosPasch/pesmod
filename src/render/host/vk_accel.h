@@ -70,7 +70,13 @@ namespace Host
         // lighting rig. The sky is a pre-lit texture on a box, and running
         // the stadium's directional and hemisphere terms over it would light
         // a thing that is already the light.
-        kRecordUnlit = 1u << 2
+        kRecordUnlit = 1u << 2,
+
+        // Take coverage from the vertex colour's alpha as well as the
+        // texture's. Set only where the texture has no alpha of its own, so
+        // the game cannot be reading coverage from it. See
+        // TextureCache::TextureCarriesAlpha.
+        kRecordVertexAlpha = 1u << 3
     };
 
     // ── Ray masks ────────────────────────────────────────────────────────
@@ -152,6 +158,9 @@ namespace Host
         // and occasional; a large number every frame would mean the reuse
         // test is not reusing anything.
         uint32_t blasResized;
+
+        // Blended instances taking coverage from the vertex colour.
+        uint32_t vertexAlphaDraws;
 
         // Build jobs dropped because another job in the same batch already
         // targeted that structure. Building one destination twice in a single
@@ -243,7 +252,17 @@ namespace Host
             // carries a baked colour instead, and those surfaces stay
             // faceted.
             uint32_t normalOffset;
-            uint32_t _pad1;
+
+            // Bytes to the D3DCOLOR diffuse, or kNoVertexAttribute.
+            //
+            // Only its alpha is used. The game modulates texture by vertex
+            // colour, so the coverage of a blended surface is the product of
+            // both - and taking it from the texture alone drew a sky glow
+            // whose vertex alpha runs 0 to 89 as a solid white sheet across
+            // the stadium roof. Its RGB is deliberately left alone: on this
+            // layout it carries the game's own baked lighting, and folding
+            // that in would light the scene twice.
+            uint32_t colorOffset;
         };
 
         static_assert(sizeof(InstanceRecord) == 64,
@@ -256,6 +275,8 @@ namespace Host
         static_assert(offsetof(InstanceRecord, flags)        == 52,
                       "InstanceRecord must match shaders/common.glsl");
         static_assert(offsetof(InstanceRecord, normalOffset) == 56,
+                      "InstanceRecord must match shaders/common.glsl");
+        static_assert(offsetof(InstanceRecord, colorOffset)  == 60,
                       "InstanceRecord must match shaders/common.glsl");
 
         // ── Materials for the merged sprite batch ────────────────────

@@ -292,6 +292,53 @@ namespace
     }
 }
 
+// Whether a blended draw's coverage includes the vertex colour's alpha.
+//
+// Direct3D 8 defaults D3DTSS_ALPHAOP to SELECTARG1 with ALPHAARG1 on the
+// texture, so alpha comes from the texture alone unless a draw says
+// otherwise. This game mostly leaves it there - which is why folding the
+// vertex alpha into everything lightened the pitch away from what the game
+// draws - and sets a modulate where it wants the two multiplied.
+//
+// An unreported stage state is all zeroes, which reads as the default and
+// leaves every recording captured before this was sent behaving exactly as
+// it did.
+bool VertexAlphaContributes(uint32_t packedStage)
+{
+    const uint32_t op   = (packedStage >> 16) & 0xFFu;
+    const uint32_t arg1 = (packedStage >> 24) & 0x0Fu;   // selector bits only
+
+    switch (op)
+    {
+    case 0:                    // not reported
+    case 1:                    // D3DTOP_DISABLE
+        return false;
+
+    // Selecting an argument: the vertex colour contributes only if that
+    // argument is the diffuse colour. At stage 0, CURRENT is the diffuse.
+    case 2:                    // D3DTOP_SELECTARG1
+        return arg1 == 0 || arg1 == 1;      // D3DTA_DIFFUSE, D3DTA_CURRENT
+
+    // Everything that combines two arguments takes both, and for stage 0
+    // the second is the diffuse colour.
+    case 3:                    // D3DTOP_MODULATE
+    case 4:                    // D3DTOP_MODULATE2X
+    case 5:                    // D3DTOP_MODULATE4X
+    case 6:                    // D3DTOP_ADD
+    case 7:                    // D3DTOP_ADDSIGNED
+    case 8:                    // D3DTOP_ADDSIGNED2X
+    case 9:                    // D3DTOP_SUBTRACT
+    case 10:                   // D3DTOP_ADDSMOOTH
+        return true;
+
+    default:
+        // The blend and bump ops. Treated as not contributing rather than
+        // guessed at: this game does not use them for alpha, and a wrong
+        // guess here is what the whole field exists to avoid.
+        return false;
+    }
+}
+
 // D3DTADDRESS_CLAMP is 3; BORDER and MIRRORONCE are treated as clamp, which
 // is closer than wrapping and neither appears in this game.
 uint32_t SamplerIndexForAddress(uint32_t packedAddress)
@@ -305,6 +352,7 @@ uint32_t SamplerIndexForAddress(uint32_t packedAddress)
 
 TextureCache::TextureCache()
     : m_device(nullptr), m_alloc(nullptr), m_commandPool(VK_NULL_HANDLE)
+    , m_lastUploadCarriesAlpha(false)
 {
     for (uint32_t i = 0; i < kSamplerCount; ++i) m_samplers[i] = VK_NULL_HANDLE;
     memset(&m_stats, 0, sizeof(m_stats));
@@ -557,6 +605,15 @@ bool TextureCache::UploadImage(const SceneIPC::TextureDesc& desc,
         bool anyAlpha = false;
         for (uint64_t b = 3; b < total && !anyAlpha; b += 4) anyAlpha = (p[b] != 0);
         if (!anyAlpha && total) ++m_stats.fullyTransparent;
+
+        // And the other end of the same question: a texture that is opaque
+        // everywhere carries no coverage, so a blended draw using it must be
+        // getting its alpha from somewhere else.
+        bool anyPartial = false;
+        for (uint64_t b = 3; b < total && !anyPartial; b += 4)
+            anyPartial = (p[b] != 255);
+        m_lastUploadCarriesAlpha = anyPartial;
+        if (!anyPartial && total) ++m_stats.opaqueAlpha;
     }
 
     VkCommandBufferAllocateInfo cbai{};
@@ -678,6 +735,7 @@ void TextureCache::Sync(SceneReceiver& scene, uint32_t budget)
         m_descriptors[slot].imageView   = m_images[slot].view;
         m_descriptors[slot].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         m_stats.bytesResident += m_images[slot].bytes;
+        m_carriesAlpha[dirty[i]] = m_lastUploadCarriesAlpha;
         ++m_stats.uploadedThisFrame;
         scene.MarkTextureClean(dirty[i]);
     }
@@ -687,6 +745,15 @@ uint32_t TextureCache::Slot(uint64_t textureId) const
 {
     auto it = m_slotOf.find(textureId);
     return (it == m_slotOf.end()) ? kWhiteTextureSlot : it->second;
+}
+
+bool TextureCache::TextureCarriesAlpha(uint64_t textureId) const
+{
+    auto it = m_carriesAlpha.find(textureId);
+
+    // An untextured draw samples the white slot, which is opaque and says
+    // nothing about coverage - the same case as an opaque texture.
+    return (it == m_carriesAlpha.end()) ? false : it->second;
 }
 
 void TextureCache::DestroyImage(Image& img)

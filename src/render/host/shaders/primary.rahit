@@ -50,8 +50,20 @@ void main()
 
         // textureLod for the same reason as in the closest-hit shader: a ray
         // tracing stage has no derivatives.
+        //
+        // Times the vertex alpha, because the game modulates the two and the
+        // closest-hit shader does the same - a surface the test lets through
+        // at one coverage and the shading composites at another is worse
+        // than either being wrong on its own.
         alpha = SampleInstance(rec, HitUv(rec, gl_PrimitiveID, attribs)).a *
                 rec.baseColor.a;
+
+        if ((rec.flags & kRecordVertexAlpha) != 0u)
+        {
+            const vec3 bary = vec3(1.0 - attribs.x - attribs.y,
+                                   attribs.x, attribs.y);
+            alpha *= HitVertexAlpha(rec, HitTriangle(rec, gl_PrimitiveID), bary);
+        }
     }
 
     // Only genuinely empty texels are stepped over now. Partial alpha used

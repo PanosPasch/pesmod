@@ -37,6 +37,11 @@ void main()
     // surface reports 1 so the ray generation stops there.
     float surfaceAlpha = 1.0;
 
+    // The game modulates the texture by the vertex colour, so a blended
+    // surface is covered by the product of both alphas. Resolved before the
+    // albedo branches so every path multiplies the same value in.
+    float vertexAlpha = 1.0;
+
     const uint debugView = uint(scene.debug.x + 0.5);
     if (debugView == kDebugInstance)
     {
@@ -94,8 +99,10 @@ void main()
         // a level from ray differentials is the proper fix and comes later.
         const vec4 sampled = SampleInstance(rec, uv);
         albedo *= sampled.rgb;
+        if ((rec.flags & kRecordVertexAlpha) != 0u)
+            vertexAlpha = HitVertexAlpha(rec, tri, bary);
         if ((rec.flags & kRecordBlended) != 0u)
-            surfaceAlpha = sampled.a * rec.baseColor.a;
+            surfaceAlpha = sampled.a * rec.baseColor.a * vertexAlpha;
     }
 
     if (debugView == kDebugAlbedo)

@@ -225,16 +225,35 @@ namespace SceneIPC
         uint32_t  paletteRegisters; // 0 when the geometry is not skinned
         float     boneIndexScale;   // c57.z: colour byte -> palette row
 
-        // D3DTSS_ADDRESSU in the low byte, ADDRESSV in the next, both
-        // D3DTADDRESS_* values. Zero means the producer did not report them
-        // and the D3D default, WRAP, applies.
+        // Stage 0's texture stage state, packed a byte at a time:
         //
-        // This is per draw, not per texture, and it matters: the pitch grass
-        // is tiled and needs WRAP, while a projected shadow samples one blob
-        // out of a mostly-empty atlas with UVs running to 5.6 and needs
+        //   byte 0  D3DTSS_ADDRESSU   D3DTADDRESS_*
+        //   byte 1  D3DTSS_ADDRESSV   D3DTADDRESS_*
+        //   byte 2  D3DTSS_ALPHAOP    D3DTOP_*
+        //   byte 3  D3DTSS_ALPHAARG1  D3DTA_* (selector bits only)
+        //
+        // All zero means the producer did not report any of it, and the
+        // Direct3D defaults apply: WRAP addressing, and alpha taken from the
+        // texture alone.
+        //
+        // Addressing is per draw, not per texture, and it matters: the pitch
+        // grass is tiled and needs WRAP, while a projected shadow samples one
+        // blob out of a mostly-empty atlas with UVs running to 5.6 and needs
         // CLAMP. Sampling that with WRAP tiles the atlas across the quad and
         // paints the player's face onto the grass five times over.
-        uint32_t  textureAddress;
+        //
+        // The alpha op decides whether a blended surface's coverage is the
+        // texture's alone or the texture times the vertex colour's. Guessing
+        // it from the texture was measurably wrong: the pitch grass is a
+        // blended draw whose texture is opaque, so a guess folded its vertex
+        // alpha in and lightened the pitch from rgb(129,134,106) to
+        // rgb(157,173,138) against the game's own rgb(76,95,51).
+        //
+        // Kept inside the existing four bytes deliberately. Growing
+        // InstanceDesc would bump the wire version and make every recording
+        // captured so far unreplayable, which is the only way this renderer
+        // gets debugged without a game running.
+        uint32_t  stageState;
     };
 
     enum InstanceFlags : uint32_t
