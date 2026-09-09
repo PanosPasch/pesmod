@@ -69,6 +69,16 @@ namespace Capture
             uint64_t textureBytes;
             uint64_t drawsSkipped;      // could not read geometry back
             uint64_t writeFailures;     // ring full
+
+            // Textures the game has that the host never gets, and why.
+            // Every one of these is a surface that renders untextured, so
+            // they are counted rather than left to be noticed in a
+            // screenshot: a texture missing for one of these reasons looks
+            // exactly like a texture missing for any other.
+            uint64_t texturesUnknownFormat;  // palettised and the like
+            uint64_t texturesCopiedBack;     // unlockable, read via CopyRects
+            uint64_t texturesUnreadable;     // not lockable and not copyable
+            uint64_t texturesRetried;        // a later attempt after a failure
         };
         const ExportStats& Stats();
     }

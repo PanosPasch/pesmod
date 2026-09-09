@@ -31,7 +31,33 @@ namespace
     // uploaded with. A slice whose hash changes has been re-skinned by the
     // game and must be sent again.
     std::unordered_map<uint64_t, uint32_t> g_sentGeometry;
-    std::unordered_map<uint64_t, uint32_t> g_sentTextures;
+    // Texture id -> how it went. A texture that failed once used to be
+    // recorded here and never looked at again, which is wrong for exactly
+    // the textures that matter most: the game composites its pitch into a
+    // render target during the match load, so an attempt made before that
+    // finishes finds nothing readable and the pitch then stays untextured
+    // for the whole session.
+    enum TextureState : uint32_t
+    {
+        kTexStateSent = 1,        // the host has it; nothing more to do
+        kTexStateHopeless = 2,    // a format or a surface we cannot read at all
+        kTexStateRetry = 3        // failed, but worth another attempt
+    };
+
+    struct SentTexture
+    {
+        uint32_t state;
+        uint32_t attempts;
+        uint64_t lastAttemptFrame;
+    };
+    std::unordered_map<uint64_t, SentTexture> g_sentTextures;
+
+    // How long to wait before trying a failed texture again, and how many
+    // times. Spread out because the cost is a lock and a copy of a whole
+    // surface, and bounded because a texture that has failed a dozen times
+    // over several seconds is not going to start working.
+    const uint64_t kTextureRetryFrames   = 30;
+    const uint32_t kTextureRetryAttempts = 12;
 
     // Last frame each geometry id was actually drawn.
     //
@@ -716,8 +742,80 @@ namespace
         return true;
     }
 
+    // Copies the rows of a locked surface out, tightly packed.
+    //
+    // The lock's pitch is not the row length: the driver pads rows, and for a
+    // block-compressed format a "row" is a row of 4x4 blocks rather than of
+    // pixels. Both have to be right or the image arrives sheared.
+    void PackLockedRows(const D3DLOCKED_RECT& lr, uint32_t fmt,
+                        const D3DSURFACE_DESC& level0,
+                        std::vector<uint8_t>& pixels)
+    {
+        const uint32_t rowBytes = D3D8Util::SurfaceBytes(level0.Format,
+                                                         level0.Width, 1);
+        const uint32_t rows = (fmt == kTexDXT1 || fmt == kTexDXT3 ||
+                               fmt == kTexDXT5)
+                            ? (level0.Height + 3) / 4
+                            : level0.Height;
+
+        pixels.resize((size_t)rowBytes * rows);
+        for (uint32_t y = 0; y < rows; ++y)
+            memcpy(pixels.data() + (size_t)y * rowBytes,
+                   (const uint8_t*)lr.pBits + (size_t)y * lr.Pitch, rowBytes);
+    }
+
+    // Reads level 0 of a texture, whichever way works.
+    //
+    // A texture in D3DPOOL_MANAGED or SYSTEMMEM locks directly. One in
+    // D3DPOOL_DEFAULT - which is where a render target lives, and where this
+    // game puts the pitch it composites at match load - refuses to lock, and
+    // has to be copied into a surface that can be. That is what CopyRects is
+    // for, and skipping it was costing every runtime-generated texture in
+    // the game.
+    bool ReadTextureLevel0(IDirect3DDevice8* device,
+                           IDirect3DTexture8* tex2d, uint32_t fmt,
+                           const D3DSURFACE_DESC& level0,
+                           std::vector<uint8_t>& pixels, bool& viaCopy)
+    {
+        viaCopy = false;
+
+        D3DLOCKED_RECT lr;
+        if (SUCCEEDED(tex2d->LockRect(0, &lr, nullptr, D3DLOCK_READONLY)))
+        {
+            PackLockedRows(lr, fmt, level0, pixels);
+            tex2d->UnlockRect(0);
+            return true;
+        }
+
+        if (!device) return false;
+
+        IDirect3DSurface8* src = nullptr;
+        if (FAILED(tex2d->GetSurfaceLevel(0, &src)) || !src) return false;
+
+        // Same size and same format: CopyRects will not convert, and asking
+        // it to is how this silently produces nothing.
+        IDirect3DSurface8* dst = nullptr;
+        bool ok = false;
+        if (SUCCEEDED(device->CreateImageSurface(level0.Width, level0.Height,
+                                                 level0.Format, &dst)) && dst)
+        {
+            if (SUCCEEDED(device->CopyRects(src, nullptr, 0, dst, nullptr)) &&
+                SUCCEEDED(dst->LockRect(&lr, nullptr, D3DLOCK_READONLY)))
+            {
+                PackLockedRows(lr, fmt, level0, pixels);
+                dst->UnlockRect();
+                ok = true;
+                viaCopy = true;
+            }
+            dst->Release();
+        }
+        src->Release();
+        return ok;
+    }
+
     // Uploads a texture the first time an instance references it.
-    void EnsureTextureSent(IDirect3DBaseTexture8* texture, uint64_t& outId)
+    void EnsureTextureSent(IDirect3DDevice8* device,
+                           IDirect3DBaseTexture8* texture, uint64_t& outId)
     {
         outId = 0;
         if (!texture) return;
@@ -726,14 +824,35 @@ namespace
         if (!info) return;
         outId = info->id;
 
-        if (g_sentTextures.count(info->id)) return;
+        SentTexture& record = g_sentTextures[info->id];
+        if (record.state == kTexStateSent || record.state == kTexStateHopeless)
+            return;
+
+        if (record.attempts)
+        {
+            // A retry, spread out in time and bounded in number.
+            if (record.attempts >= kTextureRetryAttempts)
+            {
+                record.state = kTexStateHopeless;
+                ++g_stats.texturesUnreadable;
+                return;
+            }
+            if (g_stats.framesSent - record.lastAttemptFrame <
+                kTextureRetryFrames)
+                return;
+            ++g_stats.texturesRetried;
+        }
+        ++record.attempts;
+        record.lastAttemptFrame = g_stats.framesSent;
 
         const uint32_t fmt = TranslateTextureFormat(info->format);
         if (fmt == kTexUnknown)
         {
             // Palettised and other exotic formats need the palette to be
-            // meaningful; mark as sent so it is not retried every frame.
-            g_sentTextures[info->id] = 0;
+            // meaningful. Nothing about that will change, so this one is
+            // genuinely finished rather than worth retrying.
+            record.state = kTexStateHopeless;
+            ++g_stats.texturesUnknownFormat;
             return;
         }
 
@@ -741,32 +860,22 @@ namespace
         D3DSURFACE_DESC level0;
         if (FAILED(tex2d->GetLevelDesc(0, &level0)))
         {
-            g_sentTextures[info->id] = 0;
+            record.state = kTexStateHopeless;
+            ++g_stats.texturesUnreadable;
             return;
         }
-
-        D3DLOCKED_RECT lr;
-        if (FAILED(tex2d->LockRect(0, &lr, nullptr, D3DLOCK_READONLY)))
-        {
-            // Typically a D3DPOOL_DEFAULT render target. Not fatal: the host
-            // renders it untextured rather than stalling.
-            g_sentTextures[info->id] = 0;
-            return;
-        }
-
-        const uint32_t rowBytes = D3D8Util::SurfaceBytes(level0.Format,
-                                                         level0.Width, 1);
-        const uint32_t rows = (fmt == kTexDXT1 || fmt == kTexDXT3 ||
-                               fmt == kTexDXT5)
-                            ? (level0.Height + 3) / 4
-                            : level0.Height;
 
         std::vector<uint8_t> pixels;
-        pixels.resize((size_t)rowBytes * rows);
-        for (uint32_t y = 0; y < rows; ++y)
-            memcpy(pixels.data() + (size_t)y * rowBytes,
-                   (const uint8_t*)lr.pBits + (size_t)y * lr.Pitch, rowBytes);
-        tex2d->UnlockRect(0);
+        bool viaCopy = false;
+        if (!ReadTextureLevel0(device, tex2d, fmt, level0, pixels, viaCopy))
+        {
+            // Worth another go: a render target that is not populated yet
+            // can become readable a moment later, and the pitch is exactly
+            // that case.
+            record.state = kTexStateRetry;
+            return;
+        }
+        if (viaCopy) ++g_stats.texturesCopiedBack;
 
         TextureDesc td;
         memset(&td, 0, sizeof(td));
@@ -780,7 +889,7 @@ namespace
         if (g_ring.TryWrite(kMsgTexture, &td, sizeof(td), pixels.data(),
                             td.payloadBytes, false))
         {
-            g_sentTextures[info->id] = 1;
+            record.state = kTexStateSent;
             ++g_stats.textureUploads;
             g_stats.textureBytes += td.payloadBytes;
         }
@@ -825,7 +934,9 @@ void Shutdown()
     g_ring.TryWrite(kMsgShutdown, nullptr, 0, nullptr, 0, false);
     Logger::Log("[Export] Scene stream closing: %llu frames, %llu instances, "
                 "%llu geometry uploads (%.1f MB), %llu textures (%.1f MB), "
-                "%llu draws skipped, %llu write failures.",
+                "%llu draws skipped, %llu write failures. Textures not sent: "
+                "%llu unknown format, %llu unreadable (%llu needed a copy, "
+                "%llu retries).",
                 (unsigned long long)g_stats.framesSent,
                 (unsigned long long)g_stats.instancesSent,
                 (unsigned long long)g_stats.geometryUploads,
@@ -833,7 +944,11 @@ void Shutdown()
                 (unsigned long long)g_stats.textureUploads,
                 g_stats.textureBytes / (1024.0 * 1024.0),
                 (unsigned long long)g_stats.drawsSkipped,
-                (unsigned long long)g_stats.writeFailures);
+                (unsigned long long)g_stats.writeFailures,
+                (unsigned long long)g_stats.texturesUnknownFormat,
+                (unsigned long long)g_stats.texturesUnreadable,
+                (unsigned long long)g_stats.texturesCopiedBack,
+                (unsigned long long)g_stats.texturesRetried);
     g_ring.Close();
     g_active = false;
 }
@@ -1129,8 +1244,8 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
 
     // ── Materials ────────────────────────────────────────────────────────
     uint64_t baseTextureId = 0, normalTextureId = 0;
-    EnsureTextureSent(state.texture[0], baseTextureId);
-    EnsureTextureSent(state.texture[1], normalTextureId);
+    EnsureTextureSent(realDevice, state.texture[0], baseTextureId);
+    EnsureTextureSent(realDevice, state.texture[1], normalTextureId);
 
     // ── The instance ─────────────────────────────────────────────────────
     InstanceDesc inst;

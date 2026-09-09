@@ -79,6 +79,7 @@ namespace
             "  --save-every <n>   write every nth traced frame, numbered\n"
             "  --save-path <file> where to write it (default traced_frame.png;\n"
             "                     a .ppm extension writes a PPM instead)\n"
+            "  --dectest          check the texture decoders (needs no device)\n"
             "  --ao <n>           sky occlusion rays per hit (default 8;\n"
             "                     0 reproduces the game's own flat sky term)\n"
             "  --ao-reach <units> how far they look, in the game's units\n"
@@ -320,6 +321,227 @@ namespace
     // consumer had dropped and the producer would never send again.
     //
     // Needs no GPU, so it runs before the device is created.
+    // ── Texture decoding ────────────────────────────────────────────────────
+    //
+    // Needs no device and no game: the decoders are pure functions, and this is
+    // the only way they get exercised at all. Every recording captured so far
+    // contains textures in exactly one format - B8G8R8A8 - so a replay cannot
+    // tell a correct DXT decoder from one that returns nothing, and the live
+    // game is where the other formats turn up.
+    //
+    // The blocks below are written out by hand with their answers derived from
+    // the format, not from running this code and writing down what it said.
+    int RunDecodeTest()
+    {
+        printf("PESMod texture decode self-test\n\n");
+
+        auto texel = [](const uint8_t* px, uint32_t w, uint32_t x, uint32_t y)
+        {
+            return px + ((size_t)y * w + x) * 4;
+        };
+        auto isBgra = [](const uint8_t* p, int b, int g, int r, int a)
+        {
+            return p[0] == b && p[1] == g && p[2] == r && p[3] == a;
+        };
+
+        // ── Sizes ───────────────────────────────────────────────────────────
+        // A 4x4 DXT1 image is one block of 8 bytes, DXT3 and DXT5 one of 16.
+        // A 5x5 needs 2x2 blocks, because a block is 4x4 and does not divide.
+        check(Host::TextureSourceMipBytes(SceneIPC::kTexDXT1, 4, 4, 0) == 8,
+              "DXT1 4x4 is one 8-byte block");
+        check(Host::TextureSourceMipBytes(SceneIPC::kTexDXT5, 4, 4, 0) == 16,
+              "DXT5 4x4 is one 16-byte block");
+        check(Host::TextureSourceMipBytes(SceneIPC::kTexDXT1, 5, 5, 0) == 32,
+              "DXT1 5x5 rounds up to four blocks");
+        check(Host::TextureSourceMipBytes(SceneIPC::kTexL8, 8, 8, 1) == 16,
+              "L8 mip 1 of 8x8 is 4x4 bytes");
+        check(Host::TextureSourceMipBytes(SceneIPC::kTexBGRA4444, 4, 4, 0) == 32,
+              "4444 is two bytes a texel");
+
+        uint8_t out[4 * 4 * 4];
+
+        // ── DXT1, four-colour mode ──────────────────────────────────────────
+        // c0 = 0xF800 is pure red and c1 = 0x001F pure blue; c0 > c1 selects the
+        // opaque four-colour mode. Indices run two bits per texel from the
+        // low end of a little-endian word, so 0x00 gives index 0 across the top
+        // row: red. The third row is index 2, which is (2*c0 + c1)/3.
+        {
+            const uint8_t block[8] = {
+                0x00, 0xF8,   // c0: red
+                0x1F, 0x00,   // c1: blue
+                0x00,         // row 0: all index 0
+                0x55,         // row 1: all index 1
+                0xAA,         // row 2: all index 2
+                0xFF          // row 3: all index 3
+            };
+            memset(out, 0, sizeof(out));
+            check(Host::DecodeTextureMip(SceneIPC::kTexDXT1, block, sizeof(block),
+                                         4, 4, out),
+                  "DXT1 block decoded");
+            check(isBgra(texel(out, 4, 0, 0), 0, 0, 255, 255),
+                  "DXT1 index 0 is the first endpoint");
+            check(isBgra(texel(out, 4, 3, 1), 255, 0, 0, 255),
+                  "DXT1 index 1 is the second endpoint");
+
+            // (2*255 + 0)/3 = 170 red, (2*0 + 255)/3 = 85 blue.
+            const uint8_t* p = texel(out, 4, 0, 2);
+            check(p[2] == 170 && p[0] == 85 && p[1] == 0 && p[3] == 255,
+                  "DXT1 index 2 is two thirds of the way to the first endpoint");
+            check(texel(out, 4, 0, 3)[3] == 255,
+                  "DXT1 four-colour mode has no transparent index");
+        }
+
+        // ── DXT1, three-colour mode ─────────────────────────────────────────
+        // The endpoints swapped, so c0 < c1 and index 3 becomes transparent.
+        // This is the whole reason the mode bit exists, and getting it backwards
+        // makes a third of every alpha-cut texture opaque black.
+        {
+            const uint8_t block[8] = {
+                0x1F, 0x00,   // c0: blue
+                0x00, 0xF8,   // c1: red
+                0x00, 0x00, 0x00, 0xFF   // row 3 all index 3
+            };
+            memset(out, 0xCD, sizeof(out));
+            check(Host::DecodeTextureMip(SceneIPC::kTexDXT1, block, sizeof(block),
+                                         4, 4, out),
+                  "DXT1 three-colour block decoded");
+            check(texel(out, 4, 0, 0)[3] == 255,
+                  "DXT1 three-colour index 0 stays opaque");
+            check(isBgra(texel(out, 4, 2, 3), 0, 0, 0, 0),
+                  "DXT1 three-colour index 3 is transparent");
+        }
+
+        // ── DXT3 ────────────────────────────────────────────────────────────
+        // Four-bit alpha, two texels a byte, low nibble first. 0x0F then 0xF0
+        // gives 15, 0, 0, 15 across the first two bytes - that is alpha 255 at
+        // texel 0, 0 at texels 1 and 2, and 255 at texel 3.
+        //
+        // The colour half is deliberately in c0 < c1 order: DXT3 has its own
+        // alpha, so its colour endpoints are always four-colour whatever their
+        // order. Reading them the DXT1 way would make index 3 transparent and
+        // throw the block's real alpha away.
+        {
+            uint8_t block[16] = { 0 };
+            block[0] = 0x0F;   // texel 0 -> 15, texel 1 -> 0
+            block[1] = 0xF0;   // texel 2 -> 0,  texel 3 -> 15
+            block[8]  = 0x1F; block[9]  = 0x00;   // c0: blue
+            block[10] = 0x00; block[11] = 0xF8;   // c1: red
+            block[15] = 0xFF;                      // row 3: all index 3
+
+            memset(out, 0, sizeof(out));
+            check(Host::DecodeTextureMip(SceneIPC::kTexDXT3, block, sizeof(block),
+                                         4, 4, out),
+                  "DXT3 block decoded");
+            check(texel(out, 4, 0, 0)[3] == 255 && texel(out, 4, 1, 0)[3] == 0 &&
+                  texel(out, 4, 2, 0)[3] == 0   && texel(out, 4, 3, 0)[3] == 255,
+                  "DXT3 alpha nibbles land on the right texels");
+            check(texel(out, 4, 0, 3)[3] == 0,
+                  "DXT3 index 3 takes its alpha from the alpha block, not the "
+                  "colour mode");
+
+            // Index 3 in four-colour mode is (c0 + 2*c1)/3: mostly red.
+            const uint8_t* p = texel(out, 4, 0, 3);
+            check(p[2] == 170 && p[0] == 85,
+                  "DXT3 colour endpoints are always four-colour");
+        }
+
+        // ── DXT5 ────────────────────────────────────────────────────────────
+        // a0 = 255, a1 = 0 and a0 > a1 selects the eight-value ramp:
+        // index 0 is 255, index 1 is 0, and index 2 is (6*255 + 1*0)/7 = 218.
+        {
+            uint8_t block[16] = { 0 };
+            block[0] = 255;    // a0
+            block[1] = 0;      // a1
+            // Sixteen 3-bit indices over six bytes. 0b...010'001'000 = 0x88, 0x00
+            // puts index 0 at texel 0, index 1 at texel 1, index 2 at texel 2.
+            block[2] = 0x88;
+            block[3] = 0x00;
+            block[8]  = 0x00; block[9]  = 0xF8;   // c0: red
+            block[10] = 0x1F; block[11] = 0x00;   // c1: blue
+
+            memset(out, 0, sizeof(out));
+            check(Host::DecodeTextureMip(SceneIPC::kTexDXT5, block, sizeof(block),
+                                         4, 4, out),
+                  "DXT5 block decoded");
+            check(texel(out, 4, 0, 0)[3] == 255, "DXT5 alpha index 0 is a0");
+            check(texel(out, 4, 1, 0)[3] == 0,   "DXT5 alpha index 1 is a1");
+            check(texel(out, 4, 2, 0)[3] == 218,
+                  "DXT5 alpha index 2 is one seventh of the way from a0 to a1");
+        }
+
+        // ── The uncompressed formats ────────────────────────────────────────
+        {
+            // R5G6B5: 0xFFFF is white, and bit replication has to reach 255
+            // exactly rather than 248 or 252.
+            const uint8_t px565[8] = { 0xFF, 0xFF,  0x00, 0x00,
+                                       0x00, 0xF8,  0x1F, 0x00 };
+            memset(out, 0, sizeof(out));
+            check(Host::DecodeTextureMip(SceneIPC::kTexBGR565, px565, sizeof(px565),
+                                         2, 2, out),
+                  "565 decoded");
+            check(isBgra(out + 0, 255, 255, 255, 255),
+                  "565 all bits set is exactly white, not 248");
+            check(isBgra(out + 4, 0, 0, 0, 255), "565 zero is opaque black");
+            check(isBgra(out + 8, 0, 0, 255, 255), "565 red channel is the top bits");
+            check(isBgra(out + 12, 255, 0, 0, 255), "565 blue channel is the low bits");
+        }
+        {
+            // A1R5G5B5: the top bit is alpha, all or nothing.
+            const uint8_t px1555[4] = { 0xFF, 0xFF,  0xFF, 0x7F };
+            memset(out, 0, sizeof(out));
+            check(Host::DecodeTextureMip(SceneIPC::kTexBGRA5551, px1555,
+                                         sizeof(px1555), 2, 1, out),
+                  "5551 decoded");
+            check(isBgra(out + 0, 255, 255, 255, 255), "5551 top bit set is opaque");
+            check(out[7] == 0, "5551 top bit clear is transparent");
+        }
+        {
+            // A4R4G4B4: every nibble expands by 17, so 0xF is 255 and 0x8 is 136.
+            const uint8_t px4444[4] = { 0xFF, 0xFF,  0x88, 0x88 };
+            memset(out, 0, sizeof(out));
+            check(Host::DecodeTextureMip(SceneIPC::kTexBGRA4444, px4444,
+                                         sizeof(px4444), 2, 1, out),
+                  "4444 decoded");
+            check(isBgra(out + 0, 255, 255, 255, 255), "4444 all nibbles set is white");
+            check(isBgra(out + 4, 136, 136, 136, 136), "4444 mid nibble is 136");
+        }
+        {
+            const uint8_t l8[2] = { 0, 200 };
+            memset(out, 0, sizeof(out));
+            check(Host::DecodeTextureMip(SceneIPC::kTexL8, l8, sizeof(l8), 2, 1, out),
+                  "L8 decoded");
+            check(isBgra(out + 0, 0, 0, 0, 255) && isBgra(out + 4, 200, 200, 200, 255),
+                  "L8 is grey and opaque");
+
+            // A8L8 is luminance in the low byte and alpha in the high one, which
+            // is the opposite way round from how the name reads.
+            const uint8_t a8l8[4] = { 200, 64,  10, 255 };
+            memset(out, 0, sizeof(out));
+            check(Host::DecodeTextureMip(SceneIPC::kTexA8L8, a8l8, sizeof(a8l8),
+                                         2, 1, out),
+                  "A8L8 decoded");
+            check(isBgra(out + 0, 200, 200, 200, 64) &&
+                  isBgra(out + 4, 10, 10, 10, 255),
+                  "A8L8 puts luminance in the low byte and alpha in the high one");
+        }
+
+        // ── A payload that lies about its size ──────────────────────────────
+        // The producer is another process; a short payload must be refused
+        // rather than read past.
+        {
+            const uint8_t truncated[4] = { 0, 0, 0, 0 };
+            check(!Host::DecodeTextureMip(SceneIPC::kTexDXT1, truncated,
+                                          sizeof(truncated), 4, 4, out),
+                  "a payload shorter than its own description is refused");
+            check(!Host::DecodeTextureMip(SceneIPC::kTexUnknown, truncated,
+                                          sizeof(truncated), 1, 1, out),
+                  "an unknown format is refused rather than guessed at");
+        }
+
+        printf("\n%s\n", g_failures ? "FAILURES PRESENT" : "ALL CHECKS PASSED");
+        return g_failures ? 1 : 0;
+    }
+
     int RunResendTest()
     {
         const char* kSection = "Local\\PESMod.SceneStream.ResendTest";
@@ -1211,7 +1433,8 @@ namespace
                    st.blasResized);
     }
 
-    void ReportSummary(const Host::SceneReceiver& rx)
+    void ReportSummary(const Host::SceneReceiver& rx,
+                       const Host::TextureCache& textures)
     {
         const Host::ReceiverStats& s = rx.Stats();
         const Host::Frame& f = rx.CurrentFrame();
@@ -1227,6 +1450,20 @@ namespace
                (unsigned long long)s.geometryUploads, rx.GeometryCount());
         printf("  texture uploads      %llu (%zu resident)\n",
                (unsigned long long)s.textureUploads, rx.TextureCount());
+
+        // Always, not only when non-zero. A texture the host never managed
+        // to make resident renders as white, and on screen that looks the
+        // same whatever the reason - so the reasons are printed even when
+        // there are none, and a run with a missing texture says so itself.
+        const Host::TextureStats& ts = textures.Stats();
+        printf("  textures resident    %u of %u slots, %.1f MB\n",
+               ts.resident, textures.Capacity(),
+               ts.bytesResident / (1024.0 * 1024.0));
+        printf("  textures not shown   %u undecodable, %u past capacity\n",
+               ts.skippedFormat, ts.skippedFull);
+        printf("  textures adjusted    %u X8 forced opaque, "
+               "%u fully transparent\n",
+               ts.opaqueForced, ts.fullyTransparent);
         printf("  malformed messages   %llu\n",
                (unsigned long long)s.malformedMessages);
         printf("  producer dropped     %llu frames / %.1f MB\n",
@@ -1271,6 +1508,7 @@ int main(int argc, char** argv)
     bool        skinTest = false;
     bool        resendTest = false;
     bool        replayTest = false;
+    bool        decodeTest = false;
     bool        validation = true;
     // The traced image is the output now, so a window is the default.
     // Batch work over a recording still wants no window at all.
@@ -1316,6 +1554,7 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--skintest")) skinTest = true;
         else if (!strcmp(argv[i], "--resendtest")) resendTest = true;
         else if (!strcmp(argv[i], "--replaytest")) replayTest = true;
+        else if (!strcmp(argv[i], "--dectest")) decodeTest = true;
         else if (!strcmp(argv[i], "--record") && i + 1 < argc) recordPath = argv[++i];
         else if (!strcmp(argv[i], "--replay") && i + 1 < argc) replayPath = argv[++i];
         else if (!strcmp(argv[i], "--skip") && i + 1 < argc)
@@ -1343,6 +1582,7 @@ int main(int argc, char** argv)
     SetConsoleCtrlHandler(ConsoleHandler, TRUE);
 
     // Needs no device, so it runs before one is created.
+    if (decodeTest) return RunDecodeTest();
     if (resendTest) return RunResendTest();
     if (replayTest) return RunReplayTest();
 
@@ -1633,18 +1873,21 @@ int main(int argc, char** argv)
             // cache did not expect, which shows up as missing surfaces rather
             // than as an error.
             const Host::TextureStats& ts = textures.Stats();
-            if (ts.uploadedThisFrame || ts.skippedFormat || ts.fullyTransparent)
+            if (ts.uploadedThisFrame || ts.skippedFormat || ts.skippedFull ||
+                ts.fullyTransparent)
                 printf("    tex: %u resident (+%u this frame), %.1f MB | "
-                       "X8 forced opaque %u | unsupported %u | all-transparent %u\n",
+                       "X8 forced opaque %u | undecodable %u | past capacity %u"
+                       " | all-transparent %u\n",
                        ts.resident, ts.uploadedThisFrame,
                        ts.bytesResident / (1024.0 * 1024.0),
-                       ts.opaqueForced, ts.skippedFormat, ts.fullyTransparent);
+                       ts.opaqueForced, ts.skippedFormat, ts.skippedFull,
+                       ts.fullyTransparent);
         }
         ++reported;
         if (maxFrames && reported >= maxFrames) break;
     }
 
-    ReportSummary(rx);
+    ReportSummary(rx, textures);
 
     // Explicit, and in reverse order of creation: the presenter holds a
     // swapchain whose images the tracer's last blit may still be reading,

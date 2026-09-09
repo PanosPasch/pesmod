@@ -65,11 +65,28 @@ namespace Host
     // Direct3D default, which is wrap.
     uint32_t SamplerIndexForAddress(uint32_t packedAddress);
 
+    // Decodes one mip of one texture into B8G8R8A8, and how many source
+    // bytes that level occupies.
+    //
+    // Exposed for the self-test. The decoders are pure functions with
+    // exactly known answers, and no recording made so far contains a
+    // single texture in any format but B8G8R8A8 - so replaying one cannot
+    // exercise them at all, and only a test with hand-written blocks can.
+    bool DecodeTextureMip(uint32_t format, const uint8_t* src, size_t srcBytes,
+                          uint32_t width, uint32_t height, uint8_t* dst);
+    uint32_t TextureSourceMipBytes(uint32_t format, uint32_t width,
+                                   uint32_t height, uint32_t level);
+
     struct TextureStats
     {
         uint32_t resident;          // slots in use, including white
         uint32_t uploadedThisFrame;
-        uint32_t skippedFormat;     // not BGRA8
+        // A texture that never becomes resident is a surface that renders
+        // white, and every reason for it looks identical on screen. So each
+        // one is counted separately and reported even when zero: silence
+        // here is what made the live pitch's missing texture take a screen
+        // recording to notice.
+        uint32_t skippedFormat;     // nothing here can decode it
         uint32_t skippedFull;       // cache is at capacity
         uint32_t opaqueForced;      // X8R8G8B8: alpha byte is not alpha
         uint32_t fullyTransparent;  // alpha zero everywhere; drawn as nothing
@@ -123,7 +140,7 @@ namespace Host
         bool CreateImage(uint32_t width, uint32_t height, uint32_t mips,
                          Image& out);
         bool UploadImage(const SceneIPC::TextureDesc& desc,
-                         const uint8_t* pixels, Image& out);
+                         const uint8_t* pixels, size_t pixelBytes, Image& out);
         bool CreateWhiteTexture();
         void DestroyImage(Image& img);
 

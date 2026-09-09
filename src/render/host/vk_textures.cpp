@@ -12,11 +12,283 @@ namespace
     // this is a real memory cost of one descriptor each, not of one image.
     const uint32_t kCapacity = 2048;
 
+    // The size of one mip of the image the cache keeps, which is always
+    // B8G8R8A8 whatever the game sent.
     uint32_t MipBytes(uint32_t width, uint32_t height, uint32_t level)
     {
         const uint32_t w = width  >> level ? width  >> level : 1u;
         const uint32_t h = height >> level ? height >> level : 1u;
         return w * h * 4u;
+    }
+
+    // ── Source layouts ───────────────────────────────────────────────────
+    //
+    // The image the cache keeps is always B8G8R8A8, so everything the game
+    // can hand over is decoded into that on arrival. That keeps one Vulkan
+    // format, one alpha analysis and one shader path, at the cost of memory
+    // for the compressed formats - which is the right trade at 2048 slots on
+    // a card with 16 GB.
+    //
+    // Before this, anything that was not already B8G8R8A8 or B8G8R8X8 was
+    // counted and dropped, and the surfaces using it sampled the white slot.
+    // That is eight of the ten formats the producer can send.
+    uint32_t SourceMipBytes(uint32_t format, uint32_t width, uint32_t height,
+                            uint32_t level)
+    {
+        const uint32_t w = width  >> level ? width  >> level : 1u;
+        const uint32_t h = height >> level ? height >> level : 1u;
+
+        switch (format)
+        {
+        case SceneIPC::kTexDXT1:
+            return ((w + 3u) / 4u) * ((h + 3u) / 4u) * 8u;
+        case SceneIPC::kTexDXT3:
+        case SceneIPC::kTexDXT5:
+            return ((w + 3u) / 4u) * ((h + 3u) / 4u) * 16u;
+        case SceneIPC::kTexBGR565:
+        case SceneIPC::kTexBGRA5551:
+        case SceneIPC::kTexBGRA4444:
+        case SceneIPC::kTexA8L8:
+            return w * h * 2u;
+        case SceneIPC::kTexL8:
+            return w * h;
+        default:
+            return w * h * 4u;
+        }
+    }
+
+    // 5, 6 and 4 bit channels to 8, by bit replication rather than a
+    // multiply-and-shift: it maps the full range exactly onto 0..255, so
+    // white stays white.
+    inline uint8_t Expand5(uint32_t v) { return (uint8_t)((v << 3) | (v >> 2)); }
+    inline uint8_t Expand6(uint32_t v) { return (uint8_t)((v << 2) | (v >> 4)); }
+    inline uint8_t Expand4(uint32_t v) { return (uint8_t)((v << 4) | v); }
+
+    struct Bgra { uint8_t b, g, r, a; };
+
+    inline Bgra From565(uint16_t v)
+    {
+        Bgra c;
+        c.b = Expand5(v & 0x1Fu);
+        c.g = Expand6((v >> 5) & 0x3Fu);
+        c.r = Expand5((v >> 11) & 0x1Fu);
+        c.a = 255;
+        return c;
+    }
+
+    // One 4x4 block of BC1 colour. `opaqueOnly` is set by BC2 and BC3, whose
+    // alpha lives in their own half of the block: their colour endpoints are
+    // always in four-colour mode regardless of which is numerically larger,
+    // and reading them the BC1 way turns a third of the texels transparent.
+    void DecodeBc1Colour(const uint8_t* src, bool opaqueOnly, Bgra out[16])
+    {
+        const uint16_t c0 = (uint16_t)(src[0] | (src[1] << 8));
+        const uint16_t c1 = (uint16_t)(src[2] | (src[3] << 8));
+
+        Bgra p[4];
+        p[0] = From565(c0);
+        p[1] = From565(c1);
+
+        if (c0 > c1 || opaqueOnly)
+        {
+            p[2].b = (uint8_t)((2 * p[0].b + p[1].b) / 3);
+            p[2].g = (uint8_t)((2 * p[0].g + p[1].g) / 3);
+            p[2].r = (uint8_t)((2 * p[0].r + p[1].r) / 3);
+            p[2].a = 255;
+            p[3].b = (uint8_t)((p[0].b + 2 * p[1].b) / 3);
+            p[3].g = (uint8_t)((p[0].g + 2 * p[1].g) / 3);
+            p[3].r = (uint8_t)((p[0].r + 2 * p[1].r) / 3);
+            p[3].a = 255;
+        }
+        else
+        {
+            // Three colours and a transparent slot. This is how DXT1 carries
+            // one bit of alpha, and it is the only reason the mode bit exists.
+            p[2].b = (uint8_t)((p[0].b + p[1].b) / 2);
+            p[2].g = (uint8_t)((p[0].g + p[1].g) / 2);
+            p[2].r = (uint8_t)((p[0].r + p[1].r) / 2);
+            p[2].a = 255;
+            p[3].b = p[3].g = p[3].r = 0;
+            p[3].a = 0;
+        }
+
+        const uint32_t bits = (uint32_t)src[4] | ((uint32_t)src[5] << 8) |
+                              ((uint32_t)src[6] << 16) | ((uint32_t)src[7] << 24);
+        for (uint32_t i = 0; i < 16; ++i)
+            out[i] = p[(bits >> (i * 2)) & 3u];
+    }
+
+    // BC3's alpha half: two endpoints and sixteen three-bit indices.
+    void DecodeBc3Alpha(const uint8_t* src, uint8_t out[16])
+    {
+        const uint8_t a0 = src[0], a1 = src[1];
+
+        uint8_t a[8];
+        a[0] = a0;
+        a[1] = a1;
+        if (a0 > a1)
+        {
+            for (uint32_t i = 1; i < 7; ++i)
+                a[i + 1] = (uint8_t)(((7 - i) * a0 + i * a1) / 7);
+        }
+        else
+        {
+            for (uint32_t i = 1; i < 5; ++i)
+                a[i + 1] = (uint8_t)(((5 - i) * a0 + i * a1) / 5);
+            a[6] = 0;
+            a[7] = 255;
+        }
+
+        // Six bytes of packed 3-bit indices, little endian, read as two
+        // 24-bit halves so the shifts stay inside 32 bits.
+        for (uint32_t half = 0; half < 2; ++half)
+        {
+            const uint8_t* p = src + 2 + half * 3;
+            const uint32_t bits = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                                  ((uint32_t)p[2] << 16);
+            for (uint32_t i = 0; i < 8; ++i)
+                out[half * 8 + i] = a[(bits >> (i * 3)) & 7u];
+        }
+    }
+
+    // Decodes one mip level into `dst`, which holds w*h B8G8R8A8 texels.
+    // False means the payload was too short for what it claimed to be, which
+    // is a malformed message rather than an unsupported format.
+    bool DecodeMip(uint32_t format, const uint8_t* src, size_t srcBytes,
+                   uint32_t w, uint32_t h, uint8_t* dst)
+    {
+        const size_t need = SourceMipBytes(format, w, h, 0);
+        if (srcBytes < need) return false;
+
+        switch (format)
+        {
+        case SceneIPC::kTexBGRA8:
+        case SceneIPC::kTexBGRX8:
+            memcpy(dst, src, (size_t)w * h * 4);
+            return true;
+
+        case SceneIPC::kTexL8:
+            for (uint32_t i = 0; i < w * h; ++i)
+            {
+                const uint8_t l = src[i];
+                dst[i * 4 + 0] = l; dst[i * 4 + 1] = l;
+                dst[i * 4 + 2] = l; dst[i * 4 + 3] = 255;
+            }
+            return true;
+
+        case SceneIPC::kTexA8L8:
+            // Luminance in the low byte, alpha in the high one.
+            for (uint32_t i = 0; i < w * h; ++i)
+            {
+                const uint8_t l = src[i * 2 + 0];
+                dst[i * 4 + 0] = l; dst[i * 4 + 1] = l;
+                dst[i * 4 + 2] = l; dst[i * 4 + 3] = src[i * 2 + 1];
+            }
+            return true;
+
+        case SceneIPC::kTexBGR565:
+            for (uint32_t i = 0; i < w * h; ++i)
+            {
+                const Bgra c = From565((uint16_t)(src[i*2] | (src[i*2+1] << 8)));
+                dst[i*4+0] = c.b; dst[i*4+1] = c.g;
+                dst[i*4+2] = c.r; dst[i*4+3] = 255;
+            }
+            return true;
+
+        case SceneIPC::kTexBGRA5551:
+            for (uint32_t i = 0; i < w * h; ++i)
+            {
+                const uint16_t v = (uint16_t)(src[i*2] | (src[i*2+1] << 8));
+                dst[i*4+0] = Expand5(v & 0x1Fu);
+                dst[i*4+1] = Expand5((v >> 5) & 0x1Fu);
+                dst[i*4+2] = Expand5((v >> 10) & 0x1Fu);
+                // X1R5G5B5 arrives here too, and its top bit is undefined
+                // rather than zero - but the producer only maps A1R5G5B5 and
+                // X1R5G5B5 to this format together, so treating the bit as
+                // alpha is the best available reading. A texture the game
+                // drew opaque with the bit clear would vanish, which is why
+                // an all-zero alpha channel is reported rather than assumed.
+                dst[i*4+3] = (v & 0x8000u) ? 255 : 0;
+            }
+            return true;
+
+        case SceneIPC::kTexBGRA4444:
+            for (uint32_t i = 0; i < w * h; ++i)
+            {
+                const uint16_t v = (uint16_t)(src[i*2] | (src[i*2+1] << 8));
+                dst[i*4+0] = Expand4(v & 0x0Fu);
+                dst[i*4+1] = Expand4((v >> 4) & 0x0Fu);
+                dst[i*4+2] = Expand4((v >> 8) & 0x0Fu);
+                dst[i*4+3] = Expand4((v >> 12) & 0x0Fu);
+            }
+            return true;
+
+        case SceneIPC::kTexDXT1:
+        case SceneIPC::kTexDXT3:
+        case SceneIPC::kTexDXT5:
+        {
+            const bool dxt1 = format == SceneIPC::kTexDXT1;
+            const uint32_t blockBytes = dxt1 ? 8u : 16u;
+            const uint32_t bw = (w + 3u) / 4u;
+            const uint32_t bh = (h + 3u) / 4u;
+
+            for (uint32_t by = 0; by < bh; ++by)
+                for (uint32_t bx = 0; bx < bw; ++bx)
+                {
+                    const uint8_t* block = src +
+                        ((size_t)by * bw + bx) * blockBytes;
+
+                    Bgra texels[16];
+                    uint8_t alpha[16];
+                    if (dxt1)
+                    {
+                        DecodeBc1Colour(block, false, texels);
+                        for (uint32_t i = 0; i < 16; ++i) alpha[i] = texels[i].a;
+                    }
+                    else if (format == SceneIPC::kTexDXT3)
+                    {
+                        // Sixteen four-bit alphas, then the colour block.
+                        for (uint32_t i = 0; i < 16; ++i)
+                        {
+                            const uint8_t byteVal = block[i >> 1];
+                            const uint32_t nibble = (i & 1) ? (byteVal >> 4)
+                                                            : (byteVal & 0x0Fu);
+                            alpha[i] = Expand4(nibble);
+                        }
+                        DecodeBc1Colour(block + 8, true, texels);
+                    }
+                    else
+                    {
+                        DecodeBc3Alpha(block, alpha);
+                        DecodeBc1Colour(block + 8, true, texels);
+                    }
+
+                    // A block at the right or bottom edge of a texture whose
+                    // size is not a multiple of four hangs over it; those
+                    // texels are decoded and discarded.
+                    for (uint32_t ty = 0; ty < 4; ++ty)
+                    {
+                        const uint32_t y = by * 4 + ty;
+                        if (y >= h) break;
+                        for (uint32_t tx = 0; tx < 4; ++tx)
+                        {
+                            const uint32_t x = bx * 4 + tx;
+                            if (x >= w) break;
+                            const uint32_t i = ty * 4 + tx;
+                            uint8_t* out = dst + ((size_t)y * w + x) * 4;
+                            out[0] = texels[i].b;
+                            out[1] = texels[i].g;
+                            out[2] = texels[i].r;
+                            out[3] = alpha[i];
+                        }
+                    }
+                }
+            return true;
+        }
+
+        default:
+            return false;
+        }
     }
 }
 
@@ -122,7 +394,7 @@ bool TextureCache::CreateWhiteTexture()
     desc.mipLevels = 1;
 
     const uint8_t white[4] = { 255, 255, 255, 255 };
-    if (!UploadImage(desc, white, m_images[kWhiteTextureSlot]))
+    if (!UploadImage(desc, white, sizeof(white), m_images[kWhiteTextureSlot]))
     {
         m_lastError = "white texture upload failed: " + m_lastError;
         return false;
@@ -188,8 +460,23 @@ bool TextureCache::CreateImage(uint32_t width, uint32_t height, uint32_t mips,
     return true;
 }
 
+// Thin wrappers so the self-test can reach the decoders, which are
+// otherwise private to this file.
+bool DecodeTextureMip(uint32_t format, const uint8_t* src, size_t srcBytes,
+                      uint32_t width, uint32_t height, uint8_t* dst)
+{
+    return DecodeMip(format, src, srcBytes, width, height, dst);
+}
+
+uint32_t TextureSourceMipBytes(uint32_t format, uint32_t width,
+                               uint32_t height, uint32_t level)
+{
+    return SourceMipBytes(format, width, height, level);
+}
+
 bool TextureCache::UploadImage(const SceneIPC::TextureDesc& desc,
-                               const uint8_t* pixels, Image& out)
+                               const uint8_t* pixels, size_t pixelBytes,
+                               Image& out)
 {
     const uint32_t mips = desc.mipLevels ? desc.mipLevels : 1u;
 
@@ -205,11 +492,45 @@ bool TextureCache::UploadImage(const SceneIPC::TextureDesc& desc,
         DestroyImage(out);
         return false;
     }
-    memcpy(staging.mapped, pixels, (size_t)total);
+
+    // Decoded mip by mip, because the source layout and the destination
+    // layout only agree for the two 32-bit formats. The producer packs its
+    // levels tightly, largest first, in the source layout.
+    {
+        const uint8_t* src = pixels;
+        size_t remaining = pixelBytes;
+        uint8_t* dst = (uint8_t*)staging.mapped;
+
+        for (uint32_t m = 0; m < mips; ++m)
+        {
+            const uint32_t w = desc.width  >> m ? desc.width  >> m : 1u;
+            const uint32_t h = desc.height >> m ? desc.height >> m : 1u;
+            const size_t srcBytes = SourceMipBytes(desc.format,
+                                                   desc.width, desc.height, m);
+
+            if (!DecodeMip(desc.format, src, remaining, w, h, dst))
+            {
+                // Either a format nothing here understands or a payload
+                // shorter than its own description. Both are worth saying
+                // out loud rather than rendering as white.
+                m_lastError = "texture payload could not be decoded";
+                m_alloc->DestroyBuffer(staging);
+                DestroyImage(out);
+                return false;
+            }
+            src += srcBytes;
+            remaining -= srcBytes;
+            dst += MipBytes(desc.width, desc.height, m);
+        }
+    }
 
     // X8R8G8B8 carries no alpha - the high byte is whatever the game happened
     // to leave there, usually zero. Uploaded as-is, every such surface fails
     // the any-hit alpha test and disappears; the pitch went first.
+    //
+    // The decoders above already write 255 for every format that genuinely
+    // has no alpha channel, so this is only about the one format that has a
+    // byte there and no meaning in it.
     if (desc.format == SceneIPC::kTexBGRX8)
     {
         uint8_t* p = (uint8_t*)staging.mapped;
@@ -313,10 +634,11 @@ void TextureCache::Sync(SceneReceiver& scene, uint32_t budget)
         const Texture* tex = scene.FindTexture(dirty[i]);
         if (!tex) continue;
 
-        // Both are B8G8R8A8 in memory; they differ only in whether the high
-        // byte means anything. Anything else is counted, not guessed at.
-        if (tex->desc.format != SceneIPC::kTexBGRA8 &&
-            tex->desc.format != SceneIPC::kTexBGRX8)
+        // Formats are decoded on the way in now, rather than only the two
+        // that happen to match the image layout being accepted and the other
+        // eight silently rendering white. kTexUnknown is the one the producer
+        // itself could not read, and there is nothing here to decode.
+        if (tex->desc.format == SceneIPC::kTexUnknown)
         {
             ++m_stats.skippedFormat;
             scene.MarkTextureClean(dirty[i]);
@@ -342,8 +664,10 @@ void TextureCache::Sync(SceneReceiver& scene, uint32_t budget)
             m_slotOf[dirty[i]] = slot;
         }
 
-        if (!UploadImage(tex->desc, tex->pixels.data(), m_images[slot]))
+        if (!UploadImage(tex->desc, tex->pixels.data(), tex->pixels.size(),
+                         m_images[slot]))
         {
+            ++m_stats.skippedFormat;
             // Left dirty deliberately, so a transient failure is retried.
             m_slotOf.erase(dirty[i]);
             if (slot + 1 == m_stats.resident) --m_stats.resident;
