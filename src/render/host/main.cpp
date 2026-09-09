@@ -65,6 +65,9 @@ namespace
             "  --astest           trace a synthetic scene, self-check, exit\n"
             "  --skintest         check the skinning kernel, exit\n"
             "  --resendtest       check the resend loop (no GPU), exit\n"
+            "  --replaytest       check record/replay (no GPU), exit\n"
+            "  --record <file>    tee the scene stream to a file\n"
+            "  --replay <file>    render a recording instead of the game\n"
             "  --shaders <dir>    directory holding the compiled .spv files\n"
             "                     (default: shaders)\n"
             "  --trace-height <n> traced image height; the width follows the\n"
@@ -166,6 +169,139 @@ namespace
     }
 
 
+
+    // Records a stream and replays it, checking the replay reconstructs the
+    // same scene.
+    //
+    // This proves the harness before anything is diagnosed with it. A replay
+    // that quietly differed from the recording would send every later
+    // investigation down the wrong path, which is worse than having no
+    // harness at all.
+    //
+    // Needs no GPU.
+    int RunReplayTest()
+    {
+        const char* kSection = "Local\\PESMod.SceneStream.ReplayTest";
+        const char* kFile    = "pesmod_replaytest.bin";
+        printf("-------- record and replay --------\n\n");
+
+        SceneIPC::SharedRing producer;
+        if (!producer.CreateAsProducer(kSection, 1ull * 1024ull * 1024ull))
+        {
+            printf("FAIL: could not create the test section\n");
+            return 1;
+        }
+
+        // Two geometries and a texture, so the recording covers a message
+        // with a payload as well as the fixed-size ones.
+        const uint64_t kGeoA = 0xC0DE000000000001ull;
+        const uint64_t kGeoB = 0xC0DE000000000002ull;
+        const uint64_t kTex  = 0xC0DE000000000003ull;
+
+        for (int k = 0; k < 2; ++k)
+        {
+            struct V { float px, py, pz; };
+            V verts[3] = { {0,0,0}, {1,0,0}, {0,1,0} };
+
+            SceneIPC::GeometryDesc gd{};
+            gd.geometryId   = k ? kGeoB : kGeoA;
+            gd.vertexKind   = SceneIPC::kVertexPreLit;
+            gd.vertexStride = sizeof(V);
+            gd.vertexCount  = 3;
+            gd.uvOffset     = SceneIPC::kNoVertexAttribute;
+            gd.normalOffset = SceneIPC::kNoVertexAttribute;
+            gd.colorOffset  = SceneIPC::kNoVertexAttribute;
+            producer.TryWrite(SceneIPC::kMsgGeometry, &gd, sizeof(gd),
+                              verts, sizeof(verts), false);
+        }
+        {
+            SceneIPC::TextureDesc td{};
+            td.textureId    = kTex;
+            td.format       = SceneIPC::kTexBGRA8;
+            td.width        = 2;
+            td.height       = 2;
+            td.mipLevels    = 1;
+            td.payloadBytes = 2 * 2 * 4;
+
+            std::vector<uint8_t> px(td.payloadBytes, 0x7F);
+            producer.TryWrite(SceneIPC::kMsgTexture, &td, sizeof(td),
+                              px.data(), td.payloadBytes, false);
+        }
+
+        SceneIPC::FrameBegin fb{};
+        fb.frameIndex    = 11;
+        fb.renderWidth   = 640;
+        fb.renderHeight  = 480;
+        fb.instanceCount = 3;
+        producer.TryWrite(SceneIPC::kMsgFrameBegin, &fb, sizeof(fb), nullptr, 0, true);
+
+        const uint64_t ids[3] = { kGeoA, kGeoB, kGeoA };
+        for (int i = 0; i < 3; ++i)
+        {
+            SceneIPC::InstanceDesc inst{};
+            inst.geometryId    = ids[i];
+            inst.baseTextureId = kTex;
+            producer.TryWrite(SceneIPC::kMsgInstance, &inst, sizeof(inst),
+                              nullptr, 0, true);
+        }
+
+        SceneIPC::FrameEnd fe{};
+        fe.frameIndex    = 11;
+        fe.instanceCount = 3;
+        producer.TryWrite(SceneIPC::kMsgFrameEnd, &fe, sizeof(fe), nullptr, 0, true);
+
+        // ── Record ───────────────────────────────────────────────────────
+        uint64_t liveBytes = 0, liveFrameIndex = 0;
+        size_t   liveGeo = 0, liveTex = 0, liveInstances = 0;
+        {
+            Host::SceneReceiver rx;
+            if (!rx.Attach(kSection)) { printf("FAIL: attach\n"); return 1; }
+            check(rx.StartRecording(kFile), "recording opened");
+            rx.Poll();
+
+            liveGeo        = rx.GeometryCount();
+            liveTex        = rx.TextureCount();
+            liveInstances  = rx.CurrentFrame().instances.size();
+            liveFrameIndex = rx.CurrentFrame().begin.frameIndex;
+            liveBytes      = rx.RecordedBytes();
+
+            // Closed explicitly so the file is complete and readable below.
+            rx.StopRecording();
+        }
+        check(liveBytes > 0, "the recording has bytes in it");
+
+        // ── Replay ───────────────────────────────────────────────────────
+        Host::SceneReceiver replay;
+        if (!replay.StartReplay(kFile))
+        {
+            printf("FAIL: could not reopen the recording\n");
+            return 1;
+        }
+
+        // A replay stops at each frame boundary, so one Poll is one frame.
+        const bool gotFrame = replay.Poll();
+
+        check(gotFrame, "the replay produced a frame");
+        check(replay.CurrentFrame().begin.frameIndex == liveFrameIndex,
+              "same frame index");
+        check(replay.CurrentFrame().instances.size() == liveInstances,
+              "same instance count");
+        check(replay.GeometryCount() == liveGeo, "same geometry resident");
+        check(replay.TextureCount()  == liveTex, "same textures resident");
+        check(replay.FindGeometry(kGeoA) && replay.FindGeometry(kGeoB),
+              "both geometries came back by id");
+
+        const Host::Texture* t = replay.FindTexture(kTex);
+        check(t && t->pixels.size() == 16 && t->pixels[0] == 0x7F,
+              "the texture payload survived the round trip");
+        check(replay.Stats().malformedMessages == 0,
+              "nothing in the recording was malformed");
+
+        remove(kFile);
+        printf("\n%s\n", g_failures == 0 ? "ALL CHECKS PASSED"
+                                         : "FAILURES PRESENT");
+        return g_failures == 0 ? 0 : 1;
+    }
 
     // The consumer -> producer resend loop, end to end in one process.
     //
@@ -977,6 +1113,7 @@ int main(int argc, char** argv)
     bool        asTest = false;
     bool        skinTest = false;
     bool        resendTest = false;
+    bool        replayTest = false;
     bool        validation = true;
     std::string shaderDirStorage = ResolveShaderDir();
     const char* shaderDir = shaderDirStorage.c_str();
@@ -990,6 +1127,8 @@ int main(int argc, char** argv)
     // new textures would hitch badly. The rest arrive over the following
     // frames, and their surfaces sample white until they do.
     uint32_t    textureBudget = 8;
+    const char* recordPath = nullptr;
+    const char* replayPath = nullptr;
     const char* savePath = "traced_frame.png";
 
     for (int i = 1; i < argc; ++i)
@@ -1004,6 +1143,9 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--astest")) asTest = true;
         else if (!strcmp(argv[i], "--skintest")) skinTest = true;
         else if (!strcmp(argv[i], "--resendtest")) resendTest = true;
+        else if (!strcmp(argv[i], "--replaytest")) replayTest = true;
+        else if (!strcmp(argv[i], "--record") && i + 1 < argc) recordPath = argv[++i];
+        else if (!strcmp(argv[i], "--replay") && i + 1 < argc) replayPath = argv[++i];
         else if (!strcmp(argv[i], "--shaders") && i + 1 < argc) shaderDir = argv[++i];
         else if (!strcmp(argv[i], "--trace-height") && i + 1 < argc)
             traceHeight = (uint32_t)strtoul(argv[++i], nullptr, 10);
@@ -1023,6 +1165,7 @@ int main(int argc, char** argv)
 
     // Needs no device, so it runs before one is created.
     if (resendTest) return RunResendTest();
+    if (replayTest) return RunReplayTest();
 
     printf("PESMod render host (%d-bit)\n\n", (int)sizeof(void*) * 8);
 
@@ -1048,7 +1191,8 @@ int main(int argc, char** argv)
     if (skinTest)  return RunSkinTest();
     if (asTest)    return RunAccelSelfTest(gpu, shaderDir);
 
-    printf("\nattaching to '%s'\n", section);
+    if (replayPath) printf("\nreplaying '%s'\n", replayPath);
+    else            printf("\nattaching to '%s'\n", section);
 
     // These live for the whole session; only their contents are rebuilt per
     // frame, and the persistent BLASes survive across frames by design.
@@ -1077,25 +1221,45 @@ int main(int argc, char** argv)
 
     Host::SceneReceiver rx;
 
-    // The game may not be running yet, and may be restarted while the host
-    // stays up, so attaching is a retry loop rather than a one-shot.
-    while (!g_quit && !rx.IsAttached())
+    // A recording drives the identical pipeline with no game running,
+    // which is the only way to test a fix against the frame that broke.
+    if (replayPath)
     {
-        if (rx.Attach(section)) break;
-        Sleep(250);
+        if (!rx.StartReplay(replayPath))
+        {
+            printf("cannot open recording: %s\n", replayPath);
+            return 1;
+        }
+        printf("replaying.\n\n");
     }
-    if (!rx.IsAttached())
+    else
     {
-        printf("never attached; exiting\n");
-        return 1;
+        // The game may not be running yet, and may be restarted while the
+        // host stays up, so attaching is a retry loop rather than a one-shot.
+        while (!g_quit && !rx.IsAttached())
+        {
+            if (rx.Attach(section)) break;
+            Sleep(250);
+        }
+        if (!rx.IsAttached())
+        {
+            printf("never attached; exiting\n");
+            return 1;
+        }
+        printf("attached.\n\n");
+
+        if (recordPath && !rx.StartRecording(recordPath))
+            printf("WARNING: cannot write recording to %s\n", recordPath);
     }
-    printf("attached.\n\n");
 
     uint64_t reported = 0;
     while (!g_quit)
     {
         if (!rx.Poll())
         {
+            // A replay that produced no frame has reached the end of
+            // the file; nothing more is coming.
+            if (rx.IsReplaying()) break;
             Sleep(1);
             continue;
         }

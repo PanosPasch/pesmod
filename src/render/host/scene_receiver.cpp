@@ -10,7 +10,8 @@ namespace Host
 {
 
 SceneReceiver::SceneReceiver()
-    : m_residentBytes(0)
+    : m_residentBytes(0), m_recording(nullptr), m_replay(nullptr)
+    , m_recordedBytes(0)
 {
     memset(&m_frame.begin,    0, sizeof(m_frame.begin));
     memset(&m_frame.lighting, 0, sizeof(m_frame.lighting));
@@ -23,6 +24,19 @@ SceneReceiver::SceneReceiver()
     // TryRead reports the required size rather than truncating, so this only
     // affects how often the buffer has to grow.
     m_scratch.resize(4u * 1024u * 1024u);
+}
+
+SceneReceiver::~SceneReceiver()
+{
+    StopRecording();
+    if (m_replay) { fclose(m_replay); m_replay = nullptr; }
+}
+
+void SceneReceiver::StopRecording()
+{
+    if (!m_recording) return;
+    fclose(m_recording);
+    m_recording = nullptr;
 }
 
 bool SceneReceiver::Attach(const char* sectionName)
@@ -292,17 +306,63 @@ uint32_t SceneReceiver::EvictUnused(uint64_t retentionFrames)
     return dropped;
 }
 
+bool SceneReceiver::StartRecording(const char* path)
+{
+    if (m_recording) fclose(m_recording);
+    m_recording = nullptr;
+    fopen_s(&m_recording, path, "wb");
+    return m_recording != nullptr;
+}
+
+bool SceneReceiver::StartReplay(const char* path)
+{
+    if (m_replay) fclose(m_replay);
+    m_replay = nullptr;
+    fopen_s(&m_replay, path, "rb");
+    return m_replay != nullptr;
+}
+
+// One message from the file, into the scratch buffer. The header carries the
+// total length, so the file needs no framing of its own.
+bool SceneReceiver::ReadReplayMessage(uint32_t& outBytes)
+{
+    if (!m_replay) return false;
+
+    MessageHeader mh;
+    if (fread(&mh, 1, sizeof(mh), m_replay) != sizeof(mh)) return false;
+    if (mh.byteLength < sizeof(mh) || mh.byteLength > (1u << 28))
+    {
+        ++m_stats.malformedMessages;
+        return false;
+    }
+
+    if (m_scratch.size() < mh.byteLength) m_scratch.resize(mh.byteLength + 4096);
+    memcpy(m_scratch.data(), &mh, sizeof(mh));
+
+    const uint32_t rest = mh.byteLength - (uint32_t)sizeof(mh);
+    if (rest && fread(m_scratch.data() + sizeof(mh), 1, rest, m_replay) != rest)
+        return false;
+
+    outBytes = mh.byteLength;
+    return true;
+}
+
 bool SceneReceiver::Poll(uint32_t maxMessages)
 {
-    if (!m_ring.IsOpen()) return false;
+    if (!m_ring.IsOpen() && !m_replay) return false;
 
     const uint64_t framesBefore = m_stats.framesCompleted;
 
     for (uint32_t i = 0; i < maxMessages; ++i)
     {
         uint32_t msgBytes = 0, needed = 0;
-        if (!m_ring.TryRead(m_scratch.data(), (uint32_t)m_scratch.size(),
-                            &msgBytes, &needed))
+
+        if (m_replay)
+        {
+            if (!ReadReplayMessage(msgBytes)) break;   // end of recording
+        }
+        else if (!m_ring.TryRead(m_scratch.data(), (uint32_t)m_scratch.size(),
+                                 &msgBytes, &needed))
         {
             if (needed)
             {
@@ -316,9 +376,19 @@ bool SceneReceiver::Poll(uint32_t maxMessages)
             break;   // ring empty
         }
 
+        if (m_recording)
+        {
+            fwrite(m_scratch.data(), 1, msgBytes, m_recording);
+            m_recordedBytes += msgBytes;
+        }
+
         ++m_stats.messagesRead;
         m_stats.bytesReceived += msgBytes;
         HandleMessage(m_scratch.data(), msgBytes);
+
+        // A replay stops at each frame boundary so the caller renders every
+        // recorded frame rather than racing to the end of the file.
+        if (m_replay && m_stats.framesCompleted != framesBefore) break;
     }
 
     return m_stats.framesCompleted != framesBefore;

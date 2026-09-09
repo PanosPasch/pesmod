@@ -13,6 +13,7 @@
 
 #include "../ipc/shared_ring.h"
 
+#include <cstdio>
 #include <stdint.h>
 #include <string>
 #include <unordered_map>
@@ -79,12 +80,46 @@ namespace Host
     {
     public:
         SceneReceiver();
+        ~SceneReceiver();
+
+        // Not copyable: it owns two file handles, and a copy would close
+        // them twice.
+        SceneReceiver(const SceneReceiver&) = delete;
+        SceneReceiver& operator=(const SceneReceiver&) = delete;
 
         // Attaches to the shared section. Returns false if the game side is
         // not running yet; callers are expected to retry.
         bool Attach(const char* sectionName);
         void Detach();
-        bool IsAttached() const { return m_ring.IsOpen(); }
+        bool IsAttached() const { return m_ring.IsOpen() || m_replay != nullptr; }
+
+        // ── Recording and replay ─────────────────────────────────────────
+        //
+        // Every bug in this renderer so far has been found by running the
+        // game, looking at one traced frame, changing something, and running
+        // the game again. That loop costs a match per iteration and it
+        // repeatedly traded one artefact for another, because a single frame
+        // is not enough evidence to tell which of several candidate causes is
+        // the real one.
+        //
+        // A recording is the raw message stream exactly as it arrived, so
+        // replaying it drives the identical pipeline - receiver, caches,
+        // acceleration structures, shaders - with no game and no GPU
+        // dependency beyond the device itself. A fix can then be checked
+        // against the frame that actually broke.
+        //
+        // The format is deliberately trivial: the concatenated messages, each
+        // already carrying its own length. Nothing to version, and a
+        // truncated file simply replays fewer frames.
+        bool StartRecording(const char* path);
+        bool StartReplay(const char* path);
+        bool IsReplaying() const { return m_replay != nullptr; }
+
+        // Flushes and closes the recording, so it can be replayed. The
+        // destructor does this too; this exists for when a caller wants the
+        // file usable while the receiver is still alive.
+        void StopRecording();
+        uint64_t RecordedBytes() const { return m_recordedBytes; }
 
         // Drains up to `maxMessages` messages. Returns true when at least one
         // frame was completed, meaning `CurrentFrame()` is worth rendering.
@@ -140,6 +175,7 @@ namespace Host
 
     private:
         void HandleMessage(const uint8_t* msg, uint32_t bytes);
+        bool ReadReplayMessage(uint32_t& outBytes);
 
         SceneIPC::SharedRing m_ring;
         std::vector<uint8_t> m_scratch;
@@ -153,6 +189,10 @@ namespace Host
         Frame          m_building;   // frame currently being assembled
         ReceiverStats  m_stats;
         uint64_t       m_residentBytes;
+
+        FILE*    m_recording;
+        FILE*    m_replay;
+        uint64_t m_recordedBytes;
         std::vector<uint64_t> m_resendScratch;
     };
 }

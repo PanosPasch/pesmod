@@ -668,6 +668,34 @@ stands, roof and floodlights are all visible.
 
 ---
 
+### 6.6 Recording and replay
+
+Every defect in this renderer up to this point was found the same way: run
+the game, look at one traced frame, change something, run the game again.
+That loop costs a match per iteration, and it repeatedly traded one artefact
+for another — the pitch alone disappeared twice and came back speckled once,
+because a single frame is not enough evidence to say which of several
+candidate causes is the real one.
+
+`--record <file>` tees the scene stream to disk exactly as it arrived.
+`--replay <file>` feeds it back, driving the identical pipeline — receiver,
+caches, acceleration structures, shaders — with no game running. A fix can
+then be checked against the frame that actually broke, as many times as it
+takes.
+
+The format is deliberately trivial: the concatenated messages, each already
+carrying its own length. Nothing to version, and a truncated file simply
+replays fewer frames. A replay stops at each frame boundary so the caller
+renders every recorded frame rather than racing to the end of the file.
+
+`--replaytest` records a stream and replays it, requiring the same frame
+index, instance count, resident geometry and textures, and a byte-identical
+texture payload. That check exists because a replay that quietly differed
+from its recording would send every later investigation down the wrong path,
+which is worse than having no harness at all.
+
+---
+
 ### 6.6 Skinning
 
 Accepting the 40-byte layout made players appear — scattered flat across the
