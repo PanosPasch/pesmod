@@ -75,6 +75,12 @@ namespace Host
         uint32_t geometryUnresolved;    // instance referenced missing geometry
         uint32_t nonOccluding;          // skipped: drawn with depth writes off
         uint32_t skinnedRebuilds;       // structures rebuilt because the pose moved
+
+        // Build jobs dropped because another job in the same batch already
+        // targeted that structure. Building one destination twice in a single
+        // command is undefined and takes the device with it, so this must
+        // stay zero; it is counted rather than assumed.
+        uint32_t duplicateBuildsDropped;
         uint64_t blasBytes;
         uint64_t scratchBytes;
         double   buildMilliseconds;
@@ -154,14 +160,22 @@ namespace Host
             Accel() : handle(VK_NULL_HANDLE), address(0) {}
         };
 
+        // Keyed by geometry id for static meshes. A skinned mesh drawn more
+        // than once in a frame needs one structure per *instance*, because
+        // each carries its own pose - so its key mixes in which occurrence it
+        // is, and `geometryId` records where it came from for pruning.
         struct MeshBlas
         {
             Accel     accel;
             GpuBuffer vertices;
             GpuBuffer indices;
+            uint64_t  geometryId;
             uint32_t  contentHash;
             uint32_t  triangleCount;
             uint64_t  lastUsedFrame;
+
+            MeshBlas() : geometryId(0), contentHash(0), triangleCount(0)
+                       , lastUsedFrame(0) {}
         };
 
         // One structure build, prepared but not yet recorded.

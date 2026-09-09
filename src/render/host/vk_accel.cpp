@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <cstdio>
 #include <cstring>
+#include <set>
 
 using namespace SceneIPC;
 
@@ -122,6 +123,12 @@ void SkinVertices(const Geometry& geo, const std::vector<float>& palette,
 
 namespace
 {
+    inline uint64_t Mix64(uint64_t h, uint64_t v)
+    {
+        h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+        return h ? h : 1ull;
+    }
+
     uint32_t TriangleCountOf(const Geometry& g)
     {
         const uint32_t indices = g.desc.indexCount ? g.desc.indexCount
@@ -769,6 +776,13 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
 
     // One record per TLAS instance, in the same order, so
     // gl_InstanceCustomIndexEXT indexes straight into it.
+    // How many times each skinned geometry has been drawn this frame, so
+    // repeats get their own structure rather than fighting over one.
+    std::unordered_map<uint64_t, uint32_t> skinnedUse;
+
+    // Every destination already queued in this batch.
+    std::set<VkAccelerationStructureKHR> scheduled;
+
     std::vector<InstanceRecord> records;
     records.reserve(frame.instances.size());
 
@@ -839,20 +853,42 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
                 ? &frame.palettes[i] : nullptr;
         const bool skinned = geo->desc.boneCount != 0 && palette != nullptr;
 
-        MeshBlas& blas = m_meshBlas[inst.geometryId];
+        // A static mesh drawn twice shares one structure; a skinned one
+        // cannot, because each instance carries its own pose. Keyed by
+        // geometry id alone, two instances of the same skinned mesh both
+        // rebuilt into the same destination in one command buffer - which is
+        // undefined, and took the device with it.
+        uint64_t blasKey = inst.geometryId;
+        if (skinned)
+            blasKey = Mix64(inst.geometryId, ++skinnedUse[inst.geometryId]);
+
+        MeshBlas& blas = m_meshBlas[blasKey];
+        blas.geometryId = inst.geometryId;
+
         const bool needsBuild = skinned ||
                                 (blas.accel.handle == VK_NULL_HANDLE) ||
                                 (blas.contentHash != geo->desc.contentHash);
         if (needsBuild)
         {
-            if (skinned) ++m_stats.skinnedRebuilds;
             PendingBuild job;
             if (!PrepareMeshBlas(*geo, blas, job, palette, inst.boneIndexScale))
             {
-                m_meshBlas.erase(inst.geometryId);
+                m_meshBlas.erase(blasKey);
                 continue;
             }
-            blasJobs.push_back(job);
+
+            // The keying above should make a repeated destination impossible.
+            // This makes sure a future change cannot bring it back silently:
+            // the symptom is a lost device, which says nothing about why.
+            if (!scheduled.insert(job.build.dstAccelerationStructure).second)
+            {
+                ++m_stats.duplicateBuildsDropped;
+            }
+            else
+            {
+                if (skinned) ++m_stats.skinnedRebuilds;
+                blasJobs.push_back(job);
+            }
         }
         blas.lastUsedFrame = m_frameCounter;
 
@@ -976,9 +1012,17 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
 
 void AccelBuilder::PruneOrphans(const SceneReceiver& scene)
 {
+    // Skinned meshes get one structure per occurrence, so a geometry drawn
+    // eight times one frame and three the next leaves five behind. Those
+    // still reference live geometry, so staleness has to be the other test.
+    const uint64_t kUnusedFrames = 120;
+
     for (auto it = m_meshBlas.begin(); it != m_meshBlas.end(); )
     {
-        if (!scene.FindGeometry(it->first))
+        const bool stale = m_frameCounter > kUnusedFrames &&
+                           it->second.lastUsedFrame < m_frameCounter - kUnusedFrames;
+
+        if (stale || !scene.FindGeometry(it->second.geometryId))
         {
             DestroyAccel(it->second.accel);
             m_alloc->DestroyBuffer(it->second.vertices);

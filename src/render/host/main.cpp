@@ -429,6 +429,56 @@ namespace
                               texels.data(), td.payloadBytes, false);
         }
 
+        // A skinned mesh, drawn twice below. Two instances of one skinned
+        // geometry cannot share a structure - each has its own pose - and
+        // when they did, both queued a build into the same destination in one
+        // command buffer. That is undefined, and it lost the device.
+        const uint64_t kSkinnedGeometryId = 0x4444444400000006ull;
+        {
+            struct SkinVertex
+            {
+                float   px, py, pz;
+                uint8_t weights[4];
+                uint8_t indices[4];
+                float   nx, ny, nz;
+                float   u, v;
+            };
+            SkinVertex verts[6];
+            memset(verts, 0, sizeof(verts));
+            const float xs[6] = { 0, 1, 1, 0, 0, 1 };
+            const float ys[6] = { 0, 0, 1, 1, 0, 0 };
+            const float zs[6] = { 0, 0, 0, 0, 1, 1 };
+            for (int k = 0; k < 6; ++k)
+            {
+                verts[k].px = xs[k]; verts[k].py = ys[k]; verts[k].pz = zs[k];
+                verts[k].ny = 1.0f;
+                verts[k].weights[2] = 255;   // all weight on the first bone
+                verts[k].indices[2] = 0;
+            }
+            uint16_t idx[12] = { 0,1,2,  0,2,3,  0,1,4,  1,5,4 };
+
+            SceneIPC::GeometryDesc gd{};
+            gd.geometryId       = kSkinnedGeometryId;
+            gd.vertexKind       = SceneIPC::kVertexLit;
+            gd.vertexStride     = sizeof(SkinVertex);
+            gd.vertexCount      = 6;
+            gd.indexCount       = 12;
+            gd.indexStride      = 2;
+            gd.contentHash      = 0x51C0DE01u;
+            gd.normalOffset     = 20;
+            gd.uvOffset         = 32;
+            gd.colorOffset      = SceneIPC::kNoVertexAttribute;
+            gd.boneCount        = 1;
+            gd.boneWeightOffset = 12;
+            gd.boneIndexOffset  = 16;
+
+            std::vector<uint8_t> payload(sizeof(verts) + sizeof(idx));
+            memcpy(payload.data(), verts, sizeof(verts));
+            memcpy(payload.data() + sizeof(verts), idx, sizeof(idx));
+            producer.TryWrite(SceneIPC::kMsgGeometry, &gd, sizeof(gd),
+                              payload.data(), (uint32_t)payload.size(), false);
+        }
+
         // Reproduces the failure seen against the real game: the view and
         // projection reported via SetTransform are NOT the ones the shaders
         // used, so the naive factorisation rejects almost every instance.
@@ -448,7 +498,7 @@ namespace
         fb.renderHeight = 1080;
         fb.view         = Host::Math::Identity();   // deliberately wrong
         fb.projection   = Host::Math::Identity();   // deliberately wrong
-        fb.instanceCount = 4;
+        fb.instanceCount = 6;
         producer.TryWrite(SceneIPC::kMsgFrameBegin, &fb, sizeof(fb), nullptr, 0, true);
 
         // One mesh instance, and two sprites that must collapse into one.
@@ -489,9 +539,34 @@ namespace
                               nullptr, 0, true);
         }
 
+        // Two instances of the one skinned geometry, posed far apart and well
+        // off screen so the pixel checks below are unaffected. What matters
+        // here is that they get a structure each.
+        for (int k = 0; k < 2; ++k)
+        {
+            Host::Math::Mat4 world = Host::Math::Identity();
+
+            SceneIPC::InstanceDesc inst{};
+            inst.geometryId    = kSkinnedGeometryId;
+            inst.clipTransform = Host::Math::Multiply(world, trueVp);
+            inst.baseColorFactor[0] = inst.baseColorFactor[1] =
+            inst.baseColorFactor[2] = inst.baseColorFactor[3] = 1.0f;
+            inst.paletteRegisters = 3;
+            inst.boneIndexScale   = 765.0f;
+
+            // Bone 0 as a pure translation, different for each instance.
+            float palette[12] = {0};
+            palette[0] = 1.0f; palette[3]  = 1000.0f * (k + 1);
+            palette[5] = 1.0f; palette[7]  = 0.0f;
+            palette[10] = 1.0f; palette[11] = 0.0f;
+
+            producer.TryWrite(SceneIPC::kMsgInstance, &inst, sizeof(inst),
+                              palette, sizeof(palette), true);
+        }
+
         SceneIPC::FrameEnd fe{};
         fe.frameIndex    = 1;
-        fe.instanceCount = 4;
+        fe.instanceCount = 6;
         producer.TryWrite(SceneIPC::kMsgFrameEnd, &fe, sizeof(fe), nullptr, 0, true);
 
         Host::SceneReceiver rx;
@@ -526,14 +601,19 @@ namespace
 
         const Host::AccelStats& st = accel.Stats();
 
-        check(f.instances.size() == 4,      "4 instances decoded");
-        check(rx.GeometryCount() == 3,      "3 geometries resident");
+        check(f.instances.size() == 6,      "6 instances decoded");
+        check(rx.GeometryCount() == 4,      "4 geometries resident");
         check(st.geometryUnresolved == 0,   "all instances resolved their geometry");
         check(st.transformsRejected == 0,   "all world transforms affine");
-        check(st.persistentBlas == 2,       "both 4-triangle meshes got their own BLAS");
+        check(st.persistentBlas == 4,
+              "two static meshes plus one structure per skinned instance");
+        check(st.skinnedRebuilds == 2,
+              "both skinned instances were posed and rebuilt");
+        check(st.duplicateBuildsDropped == 0,
+              "no two build jobs targeted the same structure");
         check(st.spriteInstances == 2,      "both quads folded into the sprite batch");
         check(st.spriteTriangles == 4,      "sprite batch holds 4 triangles");
-        check(st.tlasInstances == 3,        "TLAS = 2 meshes + 1 merged sprite instance");
+        check(st.tlasInstances == 5,        "TLAS = 4 meshes + 1 merged sprite instance");
         check(accel.Tlas() != VK_NULL_HANDLE, "TLAS handle created");
         check(st.vpBestScore == st.vpSampleSize,
               "resolver found a VP explaining every instance");
@@ -720,6 +800,10 @@ namespace
                st.spriteInstances, st.spriteTriangles,
                st.tlasInstances, st.transformsRejected, st.nonOccluding,
                st.buildMilliseconds);
+        if (st.duplicateBuildsDropped)
+            printf("    WARNING: %u build jobs dropped for targeting a "
+                   "structure another job in the same batch already had\n",
+                   st.duplicateBuildsDropped);
         if (st.skinnedRebuilds)
             printf("    skinned: %u structures rebuilt for a new pose\n",
                    st.skinnedRebuilds);

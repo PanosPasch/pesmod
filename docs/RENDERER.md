@@ -667,7 +667,28 @@ influence *b* reads byte `2-b`. Getting that backwards swaps bone indices for
 weights and produces geometry that is wrong without looking obviously wrong.
 
 A skinned structure is rebuilt every frame by definition: its content hash
-never changes because the vertices do not — the pose does.
+never changes because the vertices do not — the pose does. It is also built
+with `PREFER_FAST_BUILD` rather than `PREFER_FAST_TRACE`, since a trace
+quality optimised for is thrown away a frame later; static geometry keeps
+fast-trace, being traced against for thousands of frames.
+
+**One structure per instance, not per geometry.** Acceleration structures are
+keyed by geometry id, which is right for a static mesh drawn twice and wrong
+for a skinned one: each instance carries its own pose. Keyed by id alone,
+two instances of one skinned mesh both queued a build into the same
+`dstAccelerationStructure` in a single command buffer. That is explicitly
+undefined, and it lost the device — on a frame with 868 instances over 154
+geometries, so it happened immediately and often.
+
+The key now mixes in which occurrence of that geometry the instance is, and
+the batch additionally refuses any job whose destination another job already
+claimed, counting it rather than trusting the keying. Structures unused for
+120 frames are dropped, because a mesh drawn eight times one frame and three
+the next leaves five behind that still reference live geometry.
+
+This is also what the validation layer is for. Nothing about the symptom —
+an unwritten output image — pointed at duplicate build destinations; the
+VUID named it outright.
 
 ---
 
