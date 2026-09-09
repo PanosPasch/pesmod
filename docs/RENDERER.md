@@ -625,7 +625,53 @@ stands, roof and floodlights are all visible.
 
 ---
 
-### 6.6 Coplanar layers, and why the pitch was noise
+### 6.6 Skinning
+
+Accepting the 40-byte layout made players appear — scattered flat across the
+pitch. Their vertex positions are not in object space at all.
+
+The game skins on the GPU with a matrix palette. `vs_000B`, which draws
+player bodies:
+
+```
+mul   r10, v2, c57.z        ; palette row = index colour * scale
+mov   a0.x, r10.x
+m4x3  r11, v0, c0           ; c[a0.x + 0..2] is one bone
+mul   r11.xyz, r11.xyzz, v1.x
+...                          ; repeated per influence
+m4x4  oPos, r11, c58        ; only then the view-projection
+```
+
+So `v0` is bone-local, `v2` holds palette indices and `v1` the weights, both
+as D3DCOLOR. Transformed by `c58` alone, every vertex lands wherever its
+bone-local coordinates happen to fall.
+
+**Detection is from the bytecode, not the declaration.** An `m4x3` against a
+constant register is the signature, and the count of them is the number of
+influences — one for `vs_0009`, two for `vs_0017`, three for `vs_000B`. The
+unskinned shaders contain no `m4x3` at all. Matching on the declaration
+instead would be wrong: a 24-byte pre-lit vertex also carries a D3DCOLOR,
+and reading that diffuse colour as a bone index would wreck geometry that is
+already correct.
+
+**Skinning runs on the host, not the producer.** The bone-local vertices
+never change, so they upload once and stay cached; only the pose crosses the
+process boundary, at 57 float4 registers per instance. Skinning in the
+producer would instead re-send 26,285 vertices every frame — about 48 MB/s,
+on a path where geometry messages are deliberately undroppable. The pose is
+applied in the same pass that copies vertices into the BLAS buffer, which
+has to touch every vertex anyway.
+
+D3DCOLOR expands to `(R,G,B,A)` as `xyzw` while the bytes are stored BGRA, so
+influence *b* reads byte `2-b`. Getting that backwards swaps bone indices for
+weights and produces geometry that is wrong without looking obviously wrong.
+
+A skinned structure is rebuilt every frame by definition: its content hash
+never changes because the vertices do not — the pose does.
+
+---
+
+### 6.7 Coplanar layers, and why the pitch was noise
 
 The game builds its pitch from **seven draws that all lie on the same
 plane**: grass, then six blended overlays for markings, wear and shadow,
@@ -670,7 +716,7 @@ paints red where nothing should be, and the check fails.
 
 ---
 
-### 6.7 The ray tracing pipeline
+### 6.8 The ray tracing pipeline
 
 Four shaders in three groups: raygen, two miss (sky and shadow), one
 closest-hit. Rays are built by unprojecting NDC through the recovered inverse

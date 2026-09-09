@@ -136,6 +136,11 @@ namespace
     // placement rather than from the mesh itself.
     std::unordered_map<uint64_t, uint32_t> g_idFrameCount;
 
+    // c0..c56 is the addressable palette: c57 holds the index scale and
+    // c58 the view-projection, so the bones cannot reach past it. Three
+    // registers per bone, so this is 18 bones with a row to spare.
+    const uint32_t kPaletteRegisters = 57;
+
     const uint32_t kMaxTrackedIdsPerKey  = 4096;
     const uint32_t kChurnReportInterval  = 900;   // ~15s at 60fps
 
@@ -290,6 +295,88 @@ namespace
         }
     }
 
+    // ── Skinning detection ───────────────────────────────────────────────
+    //
+    // The game skins players with a matrix palette in the vertex shader:
+    //
+    //     mul   r10, v2, c57.z        ; palette row = index colour * scale
+    //     mov   a0.x, r10.x
+    //     m4x3  r11, v0, c0           ; c[a0.x + 0..2] is one bone
+    //     mul   r11.xyz, r11.xyzz, v1.x
+    //     ...                          ; repeated per influence
+    //     m4x4  oPos, r11, c58
+    //
+    // So `m4x3` against a constant is the signature, and the number of them
+    // is the number of influences. The unskinned shaders transform straight
+    // through `m4x4 oPos, v0, c58` and contain no m4x3 at all.
+    //
+    // Scanning the bytecode rather than pattern-matching the vertex
+    // declaration matters: a 24-byte pre-lit vertex also carries a D3DCOLOR,
+    // and treating that diffuse colour as a bone index would wreck geometry
+    // that is currently correct.
+    const uint32_t kSm1OpcodeMask   = 0x0000FFFFu;
+    const uint32_t kSm1OpM4x3       = 21u;
+    const uint32_t kSm1OpEnd        = 0x0000FFFFu;
+    const uint32_t kSm1RegTypeShift = 28u;
+    const uint32_t kSm1RegTypeConst = 2u;
+
+    // Instruction length is not encoded in vs.1.1, so the scan walks tokens
+    // and counts source/destination registers per opcode. Only the arities
+    // this game's shaders actually use need to be right; anything else just
+    // has to not run away, which the bounded loop guarantees.
+    uint32_t CountPaletteTransforms(const std::vector<uint32_t>& fn)
+    {
+        if (fn.size() < 2) return 0;
+
+        uint32_t count = 0;
+        for (size_t i = 1; i < fn.size(); ++i)
+        {
+            const uint32_t tok = fn[i];
+            if (tok == kSm1OpEnd) break;
+            if ((tok & 0x80000000u) != 0) continue;   // not an instruction token
+
+            if ((tok & kSm1OpcodeMask) != kSm1OpM4x3) continue;
+
+            // m4x3 dest, src0, src1 - the matrix is src1.
+            if (i + 3 >= fn.size()) break;
+            const uint32_t src1 = fn[i + 3];
+            if (((src1 >> kSm1RegTypeShift) & 0x7u) == kSm1RegTypeConst) ++count;
+        }
+        return count;
+    }
+
+    // The two D3DCOLOR inputs a skinning declaration carries. The higher
+    // register is the palette index and the lower, when present, the weights
+    // - true of both the 36-byte (one influence, no weights) and 40-byte
+    // (two or three influences) layouts, and confirmed against the shaders
+    // that consume them.
+    void FindSkinAttributes(const D3D8Util::VertexDeclLayout& decl,
+                            uint32_t& outIndexOffset, uint32_t& outWeightOffset)
+    {
+        outIndexOffset  = kNoVertexAttribute;
+        outWeightOffset = kNoVertexAttribute;
+
+        uint32_t bestReg = 0, prevReg = 0;
+        for (uint32_t i = 0; i < decl.elementCount; ++i)
+        {
+            const D3D8Util::VertexDeclElement& e = decl.elements[i];
+            if (e.stream != 0 || e.type != D3D8Util::kVsdtD3DColor) continue;
+
+            if (outIndexOffset == kNoVertexAttribute || e.reg > bestReg)
+            {
+                outWeightOffset = outIndexOffset;
+                prevReg         = bestReg;
+                outIndexOffset  = e.offset;
+                bestReg         = e.reg;
+            }
+            else if (outWeightOffset == kNoVertexAttribute || e.reg > prevReg)
+            {
+                outWeightOffset = e.offset;
+                prevReg         = e.reg;
+            }
+        }
+    }
+
     // ── Vertex layout ────────────────────────────────────────────────────
     //
     // Where each attribute sits inside a vertex, read from the game's own
@@ -312,8 +399,18 @@ namespace
         uint32_t uvOffset;       // kNoVertexAttribute when absent
         uint32_t normalOffset;
         uint32_t colorOffset;
+        uint32_t boneCount;      // 0 when the shader does not skin
+        uint32_t boneIndexOffset;
+        uint32_t boneWeightOffset;
         bool     usable;         // position at offset 0, stride large enough
     };
+
+    void ClearSkin(VertexLayout& l)
+    {
+        l.boneCount        = 0;
+        l.boneIndexOffset  = kNoVertexAttribute;
+        l.boneWeightOffset = kNoVertexAttribute;
+    }
 
     VertexLayout DescribeFvfLayout(uint32_t fvf, uint32_t stride)
     {
@@ -323,6 +420,8 @@ namespace
         out.normalOffset = kNoVertexAttribute;
         out.colorOffset  = kNoVertexAttribute;
         out.usable       = false;
+
+        ClearSkin(out);
 
         D3D8Util::FvfLayout fl;
         if (!D3D8Util::FvfDecode(fvf, fl)) return out;
@@ -355,7 +454,7 @@ namespace
     // a float2 is a texture coordinate. That holds for every layout this game
     // uses, and the alternative — trusting D3DVSDE_* register numbers — is
     // meaningless without a fixed-function pipeline behind them.
-    VertexLayout DescribeDeclLayout(const D3D8Util::VertexDeclLayout& decl,
+    VertexLayout DescribeDeclLayout(const Registry::VertexShaderInfo& vs,
                                     uint32_t stride)
     {
         VertexLayout out;
@@ -365,7 +464,16 @@ namespace
         out.colorOffset  = kNoVertexAttribute;
         out.usable       = false;
 
+        ClearSkin(out);
+        const D3D8Util::VertexDeclLayout& decl = vs.layout;
         if (!decl.valid) return out;
+
+        // A skinned vertex's D3DCOLOR fields are bone data, not a diffuse
+        // colour, so this has to be settled before the loop below claims one
+        // as colorOffset.
+        out.boneCount = CountPaletteTransforms(vs.function);
+        if (out.boneCount)
+            FindSkinAttributes(decl, out.boneIndexOffset, out.boneWeightOffset);
 
         bool havePosition = false;
         for (uint32_t i = 0; i < decl.elementCount; ++i)
@@ -394,7 +502,9 @@ namespace
                 out.uvOffset = e.offset;
             }
             else if (e.type == D3D8Util::kVsdtD3DColor &&
-                     out.colorOffset == kNoVertexAttribute)
+                     out.colorOffset == kNoVertexAttribute &&
+                     e.offset != out.boneIndexOffset &&
+                     e.offset != out.boneWeightOffset)
             {
                 out.colorOffset = e.offset;
             }
@@ -859,7 +969,7 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
         const Registry::VertexShaderInfo* vs =
             Registry::FindVertexShader(state.vertexShader);
         if (!vs) { ++g_stats.drawsSkipped; ++g_skippedNoDeclaration; return; }
-        layout = DescribeDeclLayout(vs->layout, stride);
+        layout = DescribeDeclLayout(*vs, stride);
     }
 
     if (!layout.usable) { ++g_stats.drawsSkipped; ++g_skippedLayout; return; }
@@ -958,6 +1068,9 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
         gd.uvOffset     = layout.uvOffset;
         gd.normalOffset = layout.normalOffset;
         gd.colorOffset  = layout.colorOffset;
+        gd.boneCount        = layout.boneCount;
+        gd.boneIndexOffset  = layout.boneIndexOffset;
+        gd.boneWeightOffset = layout.boneWeightOffset;
 
         // Vertices and indices go as one payload, in that order, matching
         // how GeometryDesc documents the layout.
@@ -1031,13 +1144,35 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
     // c72 is the global tint the vertex shaders multiply their output by.
     memcpy(inst.baseColorFactor, state.vsConstants[72], sizeof(float) * 4);
 
+    // ── Bone palette ─────────────────────────────────────────────────────
+    // Sent with the instance rather than with the geometry: the bone-local
+    // vertices never change and are cached once, while the pose changes
+    // every frame. That keeps animated players off the geometry path, which
+    // would otherwise re-upload 26,000 vertices per frame.
+    //
+    // The whole addressable range goes, not just the bones this draw touches,
+    // because which rows it indexes is per-vertex data we would have to scan
+    // to find out - and the range is under a kilobyte.
+    std::vector<uint8_t> palette;
+    if (layout.boneCount)
+    {
+        const uint32_t rows = kPaletteRegisters;
+        palette.resize(rows * 16);
+        memcpy(palette.data(), state.vsConstants[0], rows * 16);
+
+        inst.paletteRegisters = rows;
+        inst.boneIndexScale   = state.vsConstants[57][2];   // c57.z
+    }
+
     if (state.renderState[D3DRS_ALPHABLENDENABLE]) inst.flags |= kInstanceAlphaBlend;
     if (!state.renderState[D3DRS_ZWRITEENABLE])    inst.flags |= kInstanceNoDepthWrite;
     if (state.renderState[D3DRS_ALPHATESTENABLE])  inst.flags |= kInstanceAlphaTest;
     if (state.renderState[D3DRS_CULLMODE] == 1)    inst.flags |= kInstanceTwoSided;
     if (kind == kVertexPreLit)                     inst.flags |= kInstancePreLit;
 
-    if (g_ring.TryWrite(kMsgInstance, &inst, sizeof(inst), nullptr, 0, true))
+    if (g_ring.TryWrite(kMsgInstance, &inst, sizeof(inst),
+                        palette.empty() ? nullptr : palette.data(),
+                        (uint32_t)palette.size(), true))
         ++g_instancesThisFrame, ++g_stats.instancesSent;
     else
         ++g_droppedThisFrame;

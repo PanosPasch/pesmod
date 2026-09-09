@@ -48,6 +48,11 @@ namespace Host
         SceneIPC::FrameBegin                begin;
         SceneIPC::LightingDesc              lighting;
         std::vector<SceneIPC::InstanceDesc> instances;
+
+        // One entry per instance, parallel to `instances`. Empty for an
+        // unskinned draw. Not inside InstanceDesc because its length
+        // varies and every wire structure is fixed-size by design.
+        std::vector<std::vector<float> >    palettes;
         bool                                complete;   // saw kMsgFrameEnd
         bool                                lightingValid;
     };

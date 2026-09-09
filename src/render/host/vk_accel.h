@@ -64,6 +64,7 @@ namespace Host
         const char* vpSource;           // where the winning VP came from
         uint32_t geometryUnresolved;    // instance referenced missing geometry
         uint32_t nonOccluding;          // skipped: drawn with depth writes off
+        uint32_t skinnedRebuilds;       // structures rebuilt because the pose moved
         uint64_t blasBytes;
         uint64_t scratchBytes;
         double   buildMilliseconds;
@@ -170,7 +171,12 @@ namespace Host
             VkDeviceSize                                scratchOffset;
         };
 
-        bool PrepareMeshBlas(const Geometry& geo, MeshBlas& out, PendingBuild& job);
+        // `palette` is the instance's bone pose, or null for a rigid mesh.
+        // Skinning happens during the copy into the BLAS buffer, since that
+        // pass has to touch every vertex anyway.
+        bool PrepareMeshBlas(const Geometry& geo, MeshBlas& out, PendingBuild& job,
+                             const std::vector<float>* palette = nullptr,
+                             float indexScale = 0.0f);
         bool PrepareSpriteBlas(const std::vector<float>& positions, PendingBuild& job);
         bool PrepareTlas(const std::vector<VkAccelerationStructureInstanceKHR>& instances,
                          PendingBuild& job);

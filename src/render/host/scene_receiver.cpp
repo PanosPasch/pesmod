@@ -155,6 +155,7 @@ void SceneReceiver::HandleMessage(const uint8_t* msg, uint32_t bytes)
         const bool         carriedValid    = m_building.lightingValid;
 
         m_building.instances.clear();
+        m_building.palettes.clear();
         memcpy(&m_building.begin, body, sizeof(FrameBegin));
         m_building.lighting      = carriedLighting;
         m_building.lightingValid = carriedValid;
@@ -170,6 +171,25 @@ void SceneReceiver::HandleMessage(const uint8_t* msg, uint32_t bytes)
         if (bodyBytes < sizeof(InstanceDesc)) { ++m_stats.malformedMessages; return; }
         InstanceDesc inst;
         memcpy(&inst, body, sizeof(inst));
+
+        // A skinned instance carries its bone palette as the payload. It is
+        // kept in a parallel array rather than inside InstanceDesc because
+        // its length varies and the wire structures are fixed-size by design.
+        const uint32_t rows = inst.paletteRegisters;
+        const size_t   want = (size_t)rows * 16;
+        if (rows && bodyBytes < sizeof(InstanceDesc) + want)
+        {
+            ++m_stats.malformedMessages;
+            inst.paletteRegisters = 0;   // render it unskinned rather than wrong
+        }
+
+        m_building.palettes.push_back(std::vector<float>());
+        if (inst.paletteRegisters)
+        {
+            std::vector<float>& p = m_building.palettes.back();
+            p.resize(rows * 4);
+            memcpy(p.data(), body + sizeof(InstanceDesc), want);
+        }
         m_building.instances.push_back(inst);
         break;
     }

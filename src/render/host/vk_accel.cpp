@@ -29,6 +29,95 @@ namespace
         return (double)t.QuadPart * 1000.0 / (double)f.QuadPart;
     }
 
+    // Applies the game's matrix palette to one mesh, writing world-relative
+    // positions where the bone-local ones were.
+    //
+    // This mirrors the shader exactly:
+    //
+    //     mul   r10, v2, c57.z        ; palette row = index colour * scale
+    //     mov   a0.x, r10.x
+    //     m4x3  r11, v0, c0           ; c[row + 0..2], row-vector dot4s
+    //     mul   r11.xyz, r11.xyzz, v1.x
+    //
+    // and runs here rather than in the producer because the bone-local
+    // vertices never change: they upload once and are cached, while only the
+    // pose crosses the process boundary. Skinning in the producer would
+    // instead re-send 26,000 vertices every frame, about 48 MB/s.
+    //
+    // The normal is transformed by the same rows without translation, which
+    // is what `m3x3 r8, v3, c0` does.
+    void SkinVertices(const Geometry& geo, const std::vector<float>& palette,
+                      float indexScale, uint8_t* dst)
+    {
+        const SceneIPC::GeometryDesc& d = geo.desc;
+        const uint32_t stride  = d.vertexStride;
+        const uint32_t rows    = (uint32_t)(palette.size() / 4);
+        const uint32_t weights = d.boneCount;
+
+        for (uint32_t v = 0; v < d.vertexCount; ++v)
+        {
+            const uint8_t* src = geo.vertices.data() + (size_t)v * stride;
+            uint8_t*       out = dst + (size_t)v * stride;
+
+            const float* pos = (const float*)src;
+            const float* nrm = (d.normalOffset != SceneIPC::kNoVertexAttribute)
+                             ? (const float*)(src + d.normalOffset) : nullptr;
+
+            // D3DCOLOR expands to (R,G,B,A) as x,y,z,w, each byte over 255.
+            const uint8_t* idxBytes = src + d.boneIndexOffset;
+            const uint8_t* wBytes   = (d.boneWeightOffset != SceneIPC::kNoVertexAttribute)
+                                    ? src + d.boneWeightOffset : nullptr;
+
+            float p[3] = { 0.0f, 0.0f, 0.0f };
+            float n[3] = { 0.0f, 0.0f, 0.0f };
+            float used = 0.0f;
+
+            for (uint32_t b = 0; b < weights; ++b)
+            {
+                // A D3DCOLOR's bytes are stored BGRA, so component b is at
+                // byte 2-b for the first three.
+                const int comp = (b < 3) ? (2 - (int)b) : 3;
+                const float rawIndex  = idxBytes[comp] / 255.0f;
+                const float rawWeight = wBytes ? (wBytes[comp] / 255.0f) : 1.0f;
+
+                const uint32_t row = (uint32_t)(rawIndex * indexScale + 0.5f);
+                if (row + 2 >= rows) continue;
+                if (rawWeight <= 0.0f) continue;
+
+                const float* m0 = &palette[(size_t)(row + 0) * 4];
+                const float* m1 = &palette[(size_t)(row + 1) * 4];
+                const float* m2 = &palette[(size_t)(row + 2) * 4];
+
+                p[0] += rawWeight * (pos[0]*m0[0] + pos[1]*m0[1] + pos[2]*m0[2] + m0[3]);
+                p[1] += rawWeight * (pos[0]*m1[0] + pos[1]*m1[1] + pos[2]*m1[2] + m1[3]);
+                p[2] += rawWeight * (pos[0]*m2[0] + pos[1]*m2[1] + pos[2]*m2[2] + m2[3]);
+
+                if (nrm)
+                {
+                    n[0] += rawWeight * (nrm[0]*m0[0] + nrm[1]*m0[1] + nrm[2]*m0[2]);
+                    n[1] += rawWeight * (nrm[0]*m1[0] + nrm[1]*m1[1] + nrm[2]*m1[2]);
+                    n[2] += rawWeight * (nrm[0]*m2[0] + nrm[1]*m2[1] + nrm[2]*m2[2]);
+                }
+                used += rawWeight;
+            }
+
+            // Everything but the position and normal passes through, so UVs
+            // and colours stay where the layout says they are.
+            memcpy(out, src, stride);
+
+            if (used > 0.0f)
+            {
+                float* op = (float*)out;
+                op[0] = p[0]; op[1] = p[1]; op[2] = p[2];
+                if (nrm)
+                {
+                    float* on = (float*)(out + d.normalOffset);
+                    on[0] = n[0]; on[1] = n[1]; on[2] = n[2];
+                }
+            }
+        }
+    }
+
     uint32_t TriangleCountOf(const Geometry& g)
     {
         const uint32_t indices = g.desc.indexCount ? g.desc.indexCount
@@ -130,7 +219,9 @@ bool AccelBuilder::EnsureScratch(VkDeviceSize bytes)
 }
 
 bool AccelBuilder::PrepareMeshBlas(const Geometry& geo, MeshBlas& out,
-                                   PendingBuild& job)
+                                   PendingBuild& job,
+                                   const std::vector<float>* palette,
+                                   float indexScale)
 {
     const RayTracingApi& rt = m_device->RayTracingApi_();
 
@@ -168,7 +259,17 @@ bool AccelBuilder::PrepareMeshBlas(const Geometry& geo, MeshBlas& out,
             return false;
     }
 
-    memcpy(out.vertices.mapped, geo.vertices.data(), geo.vertices.size());
+    // The copy into the BLAS buffer is where skinning happens: the same pass
+    // that would memcpy the vertices applies the pose instead.
+    if (geo.desc.boneCount && palette && !palette->empty() &&
+        geo.desc.boneIndexOffset != SceneIPC::kNoVertexAttribute)
+    {
+        SkinVertices(geo, *palette, indexScale, (uint8_t*)out.vertices.mapped);
+    }
+    else
+    {
+        memcpy(out.vertices.mapped, geo.vertices.data(), geo.vertices.size());
+    }
     if (indexCount && out.indices.IsValid())
         memcpy(out.indices.mapped, geo.indices.data(), geo.indices.size());
 
@@ -722,13 +823,23 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
             continue;
         }
 
+        // A skinned mesh's vertices are bone-local and identical every frame,
+        // so contentHash never changes - the pose does. Its structure has to
+        // be rebuilt regardless.
+        const std::vector<float>* palette =
+            (i < frame.palettes.size() && !frame.palettes[i].empty())
+                ? &frame.palettes[i] : nullptr;
+        const bool skinned = geo->desc.boneCount != 0 && palette != nullptr;
+
         MeshBlas& blas = m_meshBlas[inst.geometryId];
-        const bool needsBuild = (blas.accel.handle == VK_NULL_HANDLE) ||
+        const bool needsBuild = skinned ||
+                                (blas.accel.handle == VK_NULL_HANDLE) ||
                                 (blas.contentHash != geo->desc.contentHash);
         if (needsBuild)
         {
+            if (skinned) ++m_stats.skinnedRebuilds;
             PendingBuild job;
-            if (!PrepareMeshBlas(*geo, blas, job))
+            if (!PrepareMeshBlas(*geo, blas, job, palette, inst.boneIndexScale))
             {
                 m_meshBlas.erase(inst.geometryId);
                 continue;

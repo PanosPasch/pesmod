@@ -44,7 +44,7 @@ namespace SceneIPC
 {
     // 'PSCN' — bumped whenever any structure below changes shape.
     static const uint32_t kSceneMagic   = 0x4E435350u;
-    static const uint32_t kSceneVersion = 3u;
+    static const uint32_t kSceneVersion = 4u;
 
     // Default shared mapping size. This is address space in the *32-bit*
     // process, which only has ~2 GB of it, so the default is deliberately
@@ -110,6 +110,26 @@ namespace SceneIPC
         uint32_t uvOffset;        // float2, or kNoVertexAttribute
         uint32_t normalOffset;    // float3, or kNoVertexAttribute
         uint32_t colorOffset;     // D3DCOLOR, or kNoVertexAttribute
+
+        // ── Skinning ─────────────────────────────────────────────────────
+        // The game skins players on the GPU with a matrix palette: the
+        // vertex buffer holds bone-local positions, and the shader blends
+        // `boneCount` matrices indexed per vertex before applying c58.
+        //
+        //     mul   r10, v2, c57.z        ; index register = colour * scale
+        //     mov   a0.x, r10.x
+        //     m4x3  r11, v0, c0           ; c[a0.x + 0..2] is one bone
+        //     mul   r11.xyz, r11.xyzz, v1.x   ; weighted by v1
+        //
+        // So these positions are meaningless until the palette is applied.
+        // Transformed by c58 alone they scatter across the pitch, which is
+        // exactly what happened when this layout was first accepted.
+        //
+        // The palette rides on the instance, not here: the vertices are
+        // static and cached once, while the pose changes every frame.
+        uint32_t boneCount;       // matrices blended per vertex; 0 = not skinned
+        uint32_t boneIndexOffset; // D3DCOLOR, or kNoVertexAttribute
+        uint32_t boneWeightOffset;// D3DCOLOR, or kNoVertexAttribute (1 bone)
         uint32_t _pad0;
         // Payload follows: vertexCount*vertexStride bytes, then
         // indexCount*indexStride bytes, each padded to 8 bytes.
@@ -196,6 +216,14 @@ namespace SceneIPC
 
         float     baseColorFactor[4];
         uint32_t  flags;            // InstanceFlags
+
+        // The bone palette for this draw, when its geometry is skinned.
+        // `paletteRegisters` float4 rows follow this message as its payload,
+        // copied verbatim from the shader constant file starting at c0, so
+        // bone b occupies rows 3b, 3b+1, 3b+2 exactly as `m4x3 rN, v0, c0`
+        // reads them.
+        uint32_t  paletteRegisters; // 0 when the geometry is not skinned
+        float     boneIndexScale;   // c57.z: colour byte -> palette row
         uint32_t  _pad0;
     };
 
@@ -255,11 +283,11 @@ namespace SceneIPC
                       #type " changed size - 32/64-bit ABI would diverge")
 
     SCENEIPC_ASSERT_LAYOUT(MessageHeader,  8);
-    SCENEIPC_ASSERT_LAYOUT(GeometryDesc,  48);
+    SCENEIPC_ASSERT_LAYOUT(GeometryDesc,  64);
     SCENEIPC_ASSERT_LAYOUT(TextureDesc,   32);
     SCENEIPC_ASSERT_LAYOUT(Matrix4x4,     64);
     SCENEIPC_ASSERT_LAYOUT(FrameBegin,   160);
-    SCENEIPC_ASSERT_LAYOUT(InstanceDesc, 176);
+    SCENEIPC_ASSERT_LAYOUT(InstanceDesc, 184);
     SCENEIPC_ASSERT_LAYOUT(LightingDesc, 128);
     SCENEIPC_ASSERT_LAYOUT(FrameEnd,      16);
 
@@ -277,12 +305,14 @@ namespace SceneIPC
     static_assert(offsetof(GeometryDesc, uvOffset)     == 32, "GeometryDesc layout");
     static_assert(offsetof(GeometryDesc, normalOffset) == 36, "GeometryDesc layout");
     static_assert(offsetof(GeometryDesc, colorOffset)  == 40, "GeometryDesc layout");
+    static_assert(offsetof(GeometryDesc, boneCount)    == 44, "GeometryDesc layout");
     static_assert(offsetof(TextureDesc,  format)       == 8,  "TextureDesc layout");
     static_assert(offsetof(FrameBegin,   view)         == 16, "FrameBegin layout");
     static_assert(offsetof(FrameBegin,   projection)   == 80, "FrameBegin layout");
     static_assert(offsetof(InstanceDesc, clipTransform)  == 24,  "InstanceDesc layout");
     static_assert(offsetof(InstanceDesc, worldTransform) == 88,  "InstanceDesc layout");
     static_assert(offsetof(InstanceDesc, flags)          == 168, "InstanceDesc layout");
+    static_assert(offsetof(InstanceDesc, paletteRegisters) == 172, "InstanceDesc layout");
 
     #undef SCENEIPC_ASSERT_LAYOUT
 

@@ -611,6 +611,9 @@ namespace
                st.spriteInstances, st.spriteTriangles,
                st.tlasInstances, st.transformsRejected, st.nonOccluding,
                st.buildMilliseconds);
+        if (st.skinnedRebuilds)
+            printf("    skinned: %u structures rebuilt for a new pose\n",
+                   st.skinnedRebuilds);
     }
 
     void ReportSummary(const Host::SceneReceiver& rx)
