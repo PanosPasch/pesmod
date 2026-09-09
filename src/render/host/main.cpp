@@ -663,6 +663,8 @@ namespace
             memcpy(u.skyColor,       sky,  sizeof(sky));
             memcpy(u.groundColor,    gnd,  sizeof(gnd));
             memcpy(u.ambient,        amb,  sizeof(amb));
+            const float scl[4] = { 1.0f, 1.0f, 1.0f, 1.0f };   // c69
+            memcpy(u.lightingScale, scl, sizeof(scl));
             u.params[0] = 1000.0f;   // shadow ray length
             u.params[1] = 1.0f;      // exposure
 
@@ -1051,6 +1053,7 @@ int main(int argc, char** argv)
                 memcpy(u.skyColor,       f.lighting.skyColor,         sizeof(u.skyColor));
                 memcpy(u.groundColor,    f.lighting.groundColor,      sizeof(u.groundColor));
                 memcpy(u.ambient,        f.lighting.ambient,          sizeof(u.ambient));
+            memcpy(u.lightingScale,  f.lighting.lightingScale,   sizeof(u.lightingScale));
             }
             else
             {
@@ -1064,6 +1067,7 @@ int main(int argc, char** argv)
                 u.skyColor[0]    = u.skyColor[1]    = u.skyColor[2]    = 0.45f;
                 u.groundColor[0] = u.groundColor[1] = u.groundColor[2] = 0.18f;
                 u.ambient[0]     = u.ambient[1]     = u.ambient[2]     = 0.10f;
+                u.lightingScale[0] = u.lightingScale[1] = u.lightingScale[2] = 1.0f;
             }
             u.params[0] = 20000.0f;   // shadow ray length, in the game's units
             u.params[1] = 1.0f;

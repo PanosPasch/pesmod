@@ -102,7 +102,11 @@ void main()
                         gl_WorldRayDirectionEXT * gl_HitTEXT;
 
     // ── Direct light, with a traced shadow ───────────────────────────────
-    const vec3  L      = normalize(-scene.lightDirection.xyz);
+    // c95 points toward the light and is used unnegated, exactly as the
+    // game's `dp3 r11.x, v1, c95` does. Only its direction is wanted here -
+    // the shadow ray needs a unit vector - while GameLighting below uses the
+    // raw register, magnitude and all.
+    const vec3  L      = normalize(scene.lightDirection.xyz);
     const float nDotL  = max(dot(worldNormal, L), 0.0);
 
     shadowVisibility = 0.0;
@@ -130,14 +134,13 @@ void main()
     }
 
     // ── Shading ──────────────────────────────────────────────────────────
-    // Matches what vs_0007 does per vertex: a clamped N.L against the
-    // directional light, plus a hemisphere term, plus ambient.
-    const vec3 direct   = scene.lightColor.rgb * nDotL * shadowVisibility;
-    const vec3 indirect = HemisphereLight(worldNormal) + scene.ambient.rgb;
+    // The whole rig, transcribed from vs_0007 in common.glsl rather than
+    // reassembled here.
+    const vec3 lit = GameLighting(worldNormal, shadowVisibility);
 
     // Note what is deliberately *not* used: the 24-byte layout's vertex
     // colour. It already contains the game's own baked lighting, so folding
     // it in here would light the scene twice — see docs/RENDERER.md 4.3.
 
-    hitColor = albedo * (direct + indirect);
+    hitColor = albedo * lit;
 }

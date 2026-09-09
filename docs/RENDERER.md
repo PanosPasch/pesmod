@@ -384,14 +384,33 @@ max    r11.x, r11.x, c57.x  ; clamp at 0
 mul    r10,   r11.x, c94    ; x light colour
 dp3    r9.x,  v1, c93       ; N · up       (c93 = hemisphere axis)
 mad    r9.x,  r9.x, c57.w, c57.w   ; remap -1..1 to 0..1
-mad    r10,   c92, r9.x, r10       ; + sky colour
-mul    r8.xyz, r10, c69
+mad    r10,   c92, r9.x, r10       ; + sky colour x blend
+mad    r10,   c91, v0.w, r10       ; + ground colour, unconditionally
+mul    r8.xyz, r10, c69            ; scale the whole lit result
 add    r8.xyz, r8, c68             ; + ambient
 mul    oD0.xyz, r8, c72            ; x global tint
 dp3    r6.xy, v1, -c63             ; specular half-vector
 lit    r6, r6
 mul    oD1, r6.z, c70              ; specular colour
 ```
+
+**Three details worth transcribing rather than paraphrasing.** The
+renderer approximated this rig for a long time and each shortcut showed:
+
+- **`c95` is dotted directly, not negated.** Negating it leaves every
+  upward-facing surface — the entire pitch — with `max(N·L, 0) == 0`, so no
+  direct light and, because the shadow ray is only traced when `N·L > 0`, no
+  shadows anywhere.
+- **The hemisphere is not a `mix`.** The game *adds* ground unconditionally
+  and adds sky scaled by the blend. A `mix` between them is both dimmer in
+  the middle and flatter at the extremes.
+- **`c69` scales the lit result before ambient is added.** Leaving it out
+  makes everything uniformly too bright, which reads as washed out rather
+  than as a missing multiply.
+
+And `c95` and `c93` are **not unit vectors** — they arrive about 0.128 long
+and the shader dots them raw. Normalising them, which looks like tidying,
+multiplies the directional term by roughly eight.
 
 **The lighting rig is readable, not lost.** Captured constant values:
 

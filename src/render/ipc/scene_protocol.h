@@ -44,7 +44,7 @@ namespace SceneIPC
 {
     // 'PSCN' — bumped whenever any structure below changes shape.
     static const uint32_t kSceneMagic   = 0x4E435350u;
-    static const uint32_t kSceneVersion = 4u;
+    static const uint32_t kSceneVersion = 5u;
 
     // Default shared mapping size. This is address space in the *32-bit*
     // process, which only has ~2 GB of it, so the default is deliberately
@@ -265,6 +265,11 @@ namespace SceneIPC
         float ambient[4];           // c68
         float specularColor[4];     // c70, w = exponent
         float specularHalfDir[4];   // c63, unit length
+
+        // c69. The shader scales the whole lit result by this before adding
+        // ambient, so leaving it out makes every surface too bright:
+        //   oD0 = ((directional + hemisphere) * c69 + c68) * c72
+        float lightingScale[4];
     };
 
     struct FrameEnd
@@ -288,7 +293,7 @@ namespace SceneIPC
     SCENEIPC_ASSERT_LAYOUT(Matrix4x4,     64);
     SCENEIPC_ASSERT_LAYOUT(FrameBegin,   160);
     SCENEIPC_ASSERT_LAYOUT(InstanceDesc, 184);
-    SCENEIPC_ASSERT_LAYOUT(LightingDesc, 128);
+    SCENEIPC_ASSERT_LAYOUT(LightingDesc, 144);
     SCENEIPC_ASSERT_LAYOUT(FrameEnd,      16);
 
     // Alignment must match too: a struct can be the right size and still sit

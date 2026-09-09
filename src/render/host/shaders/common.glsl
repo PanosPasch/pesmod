@@ -29,6 +29,7 @@ struct SceneUniforms
     vec4 skyColor;          // c92
     vec4 groundColor;       // c91
     vec4 ambient;           // c68
+    vec4 lightingScale;     // c69
 
     vec4 params;            // x = shadow ray max distance, y = exposure
 };
@@ -134,11 +135,41 @@ vec3 UnprojectToWorld(vec2 ndc, float depth)
     return h.xyz / h.w;
 }
 
-// Hemisphere ambient: sky above, ground below, blended by how far the normal
-// leans along the axis. This is the same term vs_0007 computes per vertex
-// with dp3 against c93 and a 0.5/0.5 remap.
-vec3 HemisphereLight(vec3 normal)
+// The game's lighting, transcribed from vs_0007 rather than approximated:
+//
+//     dp3  r11.x, v1, c95        ; N . light, c95 used as-is
+//     max  r11.x, r11.x, c57.x   ; clamped at zero
+//     mul  r10,   r11.x, c94     ; directional colour
+//     dp3  r9.x,  v1, c93
+//     mad  r9.x,  r9.x, 0.5, 0.5 ; hemisphere blend
+//     mad  r10,   c92, r9.x, r10 ; + sky * t
+//     mad  r10,   c91, 1.0, r10  ; + ground, unconditionally
+//     mul  r8,    r10, c69
+//     add  r8,    r8,  c68       ; + ambient
+//     mul  oD0,   r8,  c72
+//
+// Three things this had wrong before, all of them visible:
+//
+//   * c95 was negated. The game dots the normal against it directly, so
+//     negating it left every upward-facing surface - the whole pitch - with
+//     zero direct light and therefore no shadow at all.
+//   * the hemisphere was a mix() between ground and sky. The game *adds*
+//     ground unconditionally and adds sky scaled by the blend, which is a
+//     brighter and flatter result.
+//   * c69 was missing entirely, so nothing was scaled down before ambient
+//     was added, and the whole image came out washed out.
+//
+// c95 and c93 are deliberately not normalised: they arrive about 0.128 long
+// and the game dots them raw, so normalising them would multiply the
+// directional term by eight.
+vec3 GameLighting(vec3 normal, float shadowVisibility)
 {
-    float t = dot(normal, -normalize(scene.hemisphereAxis.xyz)) * 0.5 + 0.5;
-    return mix(scene.groundColor.rgb, scene.skyColor.rgb, t);
+    float nDotL = max(dot(normal, scene.lightDirection.xyz), 0.0);
+    vec3  lit   = scene.lightColor.rgb * nDotL * shadowVisibility;
+
+    float t = dot(normal, scene.hemisphereAxis.xyz) * 0.5 + 0.5;
+    lit += scene.skyColor.rgb * t;
+    lit += scene.groundColor.rgb;
+
+    return lit * scene.lightingScale.rgb + scene.ambient.rgb;
 }

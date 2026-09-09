@@ -933,6 +933,7 @@ void UpdateLighting(const DeviceState& state)
     memcpy(L.ambient,          state.vsConstants[68], sizeof(float) * 4);
     memcpy(L.specularColor,    state.vsConstants[70], sizeof(float) * 4);
     memcpy(L.specularHalfDir,  state.vsConstants[63], sizeof(float) * 4);
+    memcpy(L.lightingScale,    state.vsConstants[69], sizeof(float) * 4);
 
     // Only resend on change: the rig is stable for long stretches and the
     // host carries the last value across frames.

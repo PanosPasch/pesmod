@@ -9,5 +9,5 @@ void main()
 {
     // A ray that hits nothing sees the same hemisphere the surfaces are lit
     // by, so the background and the ambient term cannot disagree.
-    hitColor = HemisphereLight(normalize(gl_WorldRayDirectionEXT));
+    hitColor = GameLighting(normalize(gl_WorldRayDirectionEXT), 0.0);
 }

@@ -42,6 +42,7 @@ namespace Host
         float skyColor[4];
         float groundColor[4];
         float ambient[4];
+        float lightingScale[4]; // c69
         float params[4];        // x = shadow ray length, y = exposure
     };
 
