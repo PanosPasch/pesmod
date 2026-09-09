@@ -595,13 +595,23 @@ bool AccelBuilder::RecoverWorld(const InstanceDesc& inst,
                                 const Math::Mat4& inverseViewProj,
                                 bool haveInverse, Math::Mat4& outWorld) const
 {
-    // A fixed-function draw already told us its world matrix outright; no
-    // factorisation, and no chance of getting it wrong.
-    if (inst.flags & kInstanceWorldValid)
-    {
-        outWorld = inst.worldTransform;
-        return true;
-    }
+    // `worldTransform` is deliberately NOT used here, even when the producer
+    // marked it valid.
+    //
+    // A fixed-function draw does know its own world matrix outright — but it
+    // knows it in SetTransform's world space, and the shader draws (405 of
+    // 466 in a measured match frame) live in the space their own c58 matrix
+    // defines. Those two spaces differ: comparing the shader VP against
+    // SetTransform's view*proj on a real frame shows rows 0 and 2 negated,
+    // an axis flip between the fixed-function and shader paths.
+    //
+    // Since the reconstructed scene lives in whatever space the resolved
+    // view-projection defines, placing fixed-function geometry by its own
+    // world matrix would mirror it in X and Z relative to everything else.
+    // Factorising every instance the same way keeps one space, whatever that
+    // space happens to be. worldTransform is still sent, as a cross-check.
+    (void)inst.worldTransform;
+
     if (!haveInverse) return false;
 
     outWorld = Math::Multiply(inst.clipTransform, inverseViewProj);

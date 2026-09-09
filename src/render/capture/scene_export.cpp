@@ -3,6 +3,7 @@
 #include "resource_registry.h"
 #include "../d3d8/d3d8_util.h"
 #include "../ipc/shared_ring.h"
+#include "../ipc/scene_conventions.h"
 #include "../../utils/logger.h"
 
 #include <windows.h>
@@ -75,6 +76,13 @@ namespace
     uint32_t g_instancesThisFrame = 0;
     uint32_t g_droppedThisFrame   = 0;
     uint64_t g_frameIndex         = 0;
+
+    // Clip transforms whose last column is nowhere near unit length. A
+    // transposition puts thousands of units there; see
+    // ClipTransformLooksSane. Cumulative, and logged once, because a
+    // convention error is systematic and does not need reporting per draw.
+    uint64_t g_insaneClipTransforms = 0;
+    bool     g_warnedInsaneClip     = false;
 
     // ── Geometry id churn diagnostic ─────────────────────────────────────
     // The host's geometry cache was observed growing without bound (~8-15 new
@@ -279,15 +287,25 @@ namespace
         return kVertexUnknown;
     }
 
-    // Copies c58..c61 out of the shadowed constant file. `m4x4 oPos, v0, c58`
-    // performs one dp4 per row, so the four registers are the matrix rows in
-    // the order a row-vector multiply expects.
+    // The interpretation of c58..c61 lives in scene_conventions.h, shared
+    // with the host so its self-test can assert it; this is inside the game
+    // and has no test harness of its own.
     void ReadClipTransform(const DeviceState& state, Matrix4x4& out)
     {
-        const uint32_t kWvpBaseRegister = 58;
-        for (int row = 0; row < 4; ++row)
-            for (int col = 0; col < 4; ++col)
-                out.m[row * 4 + col] = state.vsConstants[kWvpBaseRegister + row][col];
+        ClipTransformFromConstants(state.vsConstants, kClipTransformRegister,
+                                   out);
+    }
+
+    // out = a * b, row-vector convention: a point transforms as v * a * b.
+    void Multiply(const Matrix4x4& a, const Matrix4x4& b, Matrix4x4& out)
+    {
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c)
+            {
+                float s = 0.0f;
+                for (int k = 0; k < 4; ++k) s += a.m[r * 4 + k] * b.m[k * 4 + c];
+                out.m[r * 4 + c] = s;
+            }
     }
 
     void MatrixFromD3D(const D3DMATRIX& src, Matrix4x4& out)
@@ -505,6 +523,19 @@ void EndFrame()
 
     if (g_stats.framesSent && (g_stats.framesSent % kChurnReportInterval) == 0)
         ReportChurn();
+
+    // Once is enough: if the c58 convention is wrong it is wrong for every
+    // draw of every frame, and the point of the message is to name the cause
+    // rather than to count the symptoms.
+    if (g_insaneClipTransforms && !g_warnedInsaneClip)
+    {
+        g_warnedInsaneClip = true;
+        Logger::Log("[Export] %llu clip transforms have a non-unit last "
+            "column. The usual cause is reading c58..c61 as rows; they are "
+            "columns (see ReadClipTransform). Geometry will collapse toward "
+            "the screen centre.",
+            (unsigned long long)g_insaneClipTransforms);
+    }
 }
 
 void UpdateLighting(const DeviceState& state)
@@ -666,14 +697,33 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
     inst.baseTextureId   = baseTextureId;
     inst.normalTextureId = normalTextureId;
 
-    ReadClipTransform(state, inst.clipTransform);
-
     // A fixed-function draw genuinely is transformed by SetTransform, so its
-    // world matrix is known outright and needs no factorisation by the host.
+    // world matrix is known outright and needs no factorisation by the host —
+    // and its clip transform comes from the same place. It must NOT come from
+    // c58: a fixed-function draw does not run a vertex shader, so those
+    // registers still hold whatever the last shader draw left behind. Feeding
+    // that to the host's view-projection resolver offers it candidates that
+    // belong to no draw at all.
     if (state.VertexShaderIsFvf() && state.vertexShader != 0)
     {
         MatrixFromD3D(state.world, inst.worldTransform);
         inst.flags |= kInstanceWorldValid;
+
+        Matrix4x4 v, p, vp;
+        MatrixFromD3D(state.view, v);
+        MatrixFromD3D(state.projection, p);
+        Multiply(v, p, vp);
+        Multiply(inst.worldTransform, vp, inst.clipTransform);
+    }
+    else
+    {
+        ReadClipTransform(state, inst.clipTransform);
+
+        // A transposed read is the failure mode this check exists for; see
+        // ClipTransformLooksSane. Counted rather than dropped, because a
+        // genuinely odd matrix is data about the game, not a reason to
+        // discard the draw.
+        if (!ClipTransformLooksSane(inst.clipTransform)) ++g_insaneClipTransforms;
     }
 
     // c72 is the global tint the vertex shaders multiply their output by.

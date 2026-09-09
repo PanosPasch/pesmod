@@ -17,6 +17,7 @@
 //
 //     ipc_selftest.exe layout        prints sizes/offsets for eyeball diffing
 #include "shared_ring.h"
+#include "scene_conventions.h"
 
 #include <windows.h>
 #include <cstdio>
@@ -307,11 +308,96 @@ namespace
     }
 }
 
+namespace
+{
+    // ── The c58 convention ───────────────────────────────────────────────
+    //
+    // Anchored on constants captured from a real match frame (frame 5312,
+    // the block shared by 403 of its 405 world draws), so this tests the
+    // interpretation against the game rather than against itself.
+    //
+    // This exists because the convention was wrong for a long time and
+    // nothing could see it: reading the four registers as rows transposes
+    // the matrix, and a transposed perspective matrix produces a plausible
+    // image of nothing rather than an obvious failure.
+    int RunConventionTest()
+    {
+        printf("-- shader constant convention --\n\n");
+
+        // Indexed by real register number, exactly as the shadowed constant
+        // file is. vs.1.1 has 96 float4 constants.
+        float regs[96][4] = { { 0 } };
+        const float captured[4][4] = {
+            { -1.670755386352539f,  0.0f,                  3.491072416305542f,   -159.9615020751953f  },  // c58
+            {  0.6472594141960144f, -5.110230445861816f,   0.3097649812698364f, -3501.954345703125f   },  // c59
+            { -0.8960593342781067f, -0.13948902487754822f, -0.42883551120758057f, 3820.423583984375f  },  // c60
+            { -0.8932591080665588f, -0.1390531212091446f,  -0.42749539017677307f, 3858.484619140625f  },  // c61
+        };
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c)
+                regs[kClipTransformRegister + r][c] = captured[r][c];
+
+        Matrix4x4 m;
+        ClipTransformFromConstants(regs, kClipTransformRegister, m);
+
+        // Registers are columns: element [row][col] comes from c(58+col).
+        bool transposed = true;
+        for (int row = 0; row < 4; ++row)
+            for (int col = 0; col < 4; ++col)
+                if (m.m[row * 4 + col] != captured[col][row]) transposed = false;
+        Check(transposed, "registers are read as columns, not rows");
+
+        // The camera's forward axis lives in the last column and is unit
+        // length. Read as rows it is the translation row instead, which on
+        // this frame measures 5185 - three orders of magnitude of margin.
+        Check(ClipTransformLooksSane(m),
+              "last column is unit length, as a real view-projection's is");
+
+        Matrix4x4 wrong;
+        for (int row = 0; row < 4; ++row)
+            for (int col = 0; col < 4; ++col)
+                wrong.m[row * 4 + col] = captured[row][col];
+        Check(!ClipTransformLooksSane(wrong),
+              "the transposed reading is rejected by that same check");
+
+        // The world origin must land on screen: this frame's camera is
+        // looking at the pitch, and the game puts the pitch at the origin.
+        // Under the transposed reading it collapses to the middle of the
+        // frame instead, which is the symptom this test exists to catch —
+        // the translation row that should reach the screen edge becomes the
+        // projective column and divides itself away.
+        const float v[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        float clip[4] = { 0, 0, 0, 0 }, bad[4] = { 0, 0, 0, 0 };
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 4; ++r)
+            {
+                clip[c] += v[r] * m.m[r * 4 + c];
+                bad[c]  += v[r] * wrong.m[r * 4 + c];
+            }
+
+        const float ndcX = clip[0] / clip[3], ndcY = clip[1] / clip[3];
+        const float badX = bad[0] / bad[3],   badY = bad[1] / bad[3];
+        printf("  world origin -> ndc (%.3f, %.3f) read as columns, "
+               "(%.4f, %.4f) as rows\n", ndcX, ndcY, badX, badY);
+
+        Check(clip[3] > 0.0f && ndcX > -1.0f && ndcX < 1.0f &&
+              ndcY > -1.0f && ndcY < 1.0f,
+              "the world origin projects on screen");
+        Check(badX * badX + badY * badY < 0.01f,
+              "and collapses toward the screen centre when transposed");
+
+        printf("\n%s\n", g_failures == 0 ? "ALL CHECKS PASSED"
+                                         : "FAILURES PRESENT");
+        return g_failures == 0 ? 0 : 1;
+    }
+}
+
 int main(int argc, char** argv)
 {
     const char* mode = (argc > 1) ? argv[1] : "layout";
-    if (!strcmp(mode, "produce")) return RunProducer();
-    if (!strcmp(mode, "consume")) return RunConsumer();
+    if (!strcmp(mode, "produce"))    return RunProducer();
+    if (!strcmp(mode, "consume"))    return RunConsumer();
+    if (!strcmp(mode, "convention")) return RunConventionTest();
     PrintLayout();
     return 0;
 }

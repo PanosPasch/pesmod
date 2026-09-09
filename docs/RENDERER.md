@@ -311,11 +311,39 @@ m4x4   oPos, v0, c58        ; combined world-view-projection at c58..c61
 dp4    oFog, v0, c67        ; fog plane
 ```
 
-So `c58..c61` is a **single combined WVP matrix**, per draw. The captured
-values confirm it: `c58.x = -5.5859` matches the projection `_11` seen via
-`SetTransform`, and `c61.w = 2236.07` matches the view translation. This is
-the number the scene builder needs — not `SetTransform`, which the shaders
-ignore.
+So `c58..c61` is a **single combined WVP matrix**, per draw — and it is the
+number the scene builder needs, not `SetTransform`, which the shaders ignore.
+
+**Those four registers are the matrix's columns, not its rows.** `m4x4`
+expands to `dp4 oPos.x, v0, c58` / `.y, c59` / `.z, c60` / `.w, c61`, so
+`clip.j = dot(v0, c(58+j))` — the usual Direct3D practice of transposing a
+matrix before uploading it as constants. Reading them as rows costs a full
+debugging cycle, because a transposed perspective matrix does not look
+broken: it moves the projective terms out of the last column and into the
+last row, so every vertex divides itself down toward the screen centre and
+the result is a plausible image of nothing rather than obvious garbage.
+
+Two independent measurements on match frame 5312 pin it:
+
+| Reading | vertices in frustum | NDC of the world origin |
+| ------- | ------------------- | ----------------------- |
+| registers as rows | 0.0% (`\|ndc\|` under 0.02 everywhere) | (-0.0002, -0.0000) |
+| registers as columns | 37.4% | (-0.041, -0.908) |
+
+and the transposed reading reproduces `SetTransform`'s `view * proj` with rows
+0 and 2 negated, to every printed decimal — an axis flip between the
+fixed-function and shader paths, and a second confirmation from a source that
+shares no code with the first.
+
+The invariant worth remembering: for a perspective `VP` the last **column** is
+the camera's forward axis, so its xyz length is 1. Transposed it is the
+translation row instead, which on this frame measures 5185. One cheap check
+separates them with three orders of magnitude to spare, and
+`PESModIpcSelfTest convention` asserts it against these captured values.
+
+**Consequence for reconstruction.** 403 of that frame's 405 world draws share
+*one* `c58` block, so it is the shared view-projection and the vertices are
+already in world space. Per-object placement is the exception, not the rule.
 
 **Two geometry classes**, distinguished by their vertex layout:
 

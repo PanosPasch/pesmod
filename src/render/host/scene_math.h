@@ -4,11 +4,15 @@
 //
 // ── Conventions, because mixing them up is silent ────────────────────────
 //
-// The game is Direct3D 8 and its shaders transform with `m4x4 oPos, v0, c58`,
-// which is four dot products of the vertex against consecutive constant
-// registers. That is the **row-vector** convention: clip = v * M, with M
-// stored row-major. Every matrix arriving over the scene stream is in that
-// form.
+// The game is Direct3D 8 and works in the **row-vector** convention:
+// clip = v * M, with M stored row-major. Every matrix arriving over the scene
+// stream is in that form.
+//
+// Note that this is *not* how the matrix sits in the game's shader constants.
+// `m4x4 oPos, v0, c58` is four dot products against consecutive registers, so
+// each register is a column of M, not a row. The producer transposes on the
+// way in; see scene_conventions.h, which is where that belongs and where it
+// is tested.
 //
 // Vulkan's VkTransformMatrixKHR is the opposite: a 3x4 matrix applied as
 // p' = M * p, the **column-vector** convention. Converting between them is a

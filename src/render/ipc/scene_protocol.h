@@ -125,8 +125,9 @@ namespace SceneIPC
     };
 
     // ── Per-frame scene ──────────────────────────────────────────────────
-    // Row-major 4x4, applied as row-vector * matrix, matching how the game's
-    // m4x4 instruction consumes c58..c61.
+    // Row-major 4x4, applied as row-vector * matrix. This is the form after
+    // the producer has transposed the game's shader constants, which hold the
+    // columns rather than the rows — see scene_conventions.h.
     struct Matrix4x4
     {
         float m[16];
