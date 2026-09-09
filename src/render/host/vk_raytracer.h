@@ -87,6 +87,11 @@ namespace Host
         // were missing.
         bool IsReady() const { return m_pipeline != VK_NULL_HANDLE; }
 
+        // The traced image, for the presenter to blit onto the screen.
+        // Left in VK_IMAGE_LAYOUT_GENERAL, which is what Trace expects it
+        // in; anything that changes that must change it back.
+        VkImage OutputImage() const { return m_image; }
+
         uint32_t Width()  const { return m_width; }
         uint32_t Height() const { return m_height; }
 

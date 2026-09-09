@@ -36,6 +36,7 @@ set(HOST_SOURCES
     vk_accel.cpp
     vk_raytracer.cpp
     vk_textures.cpp
+    vk_present.cpp
     image_write.cpp
     ../ipc/shared_ring.cpp
 )
@@ -83,6 +84,10 @@ add_executable(PESModHost ${HOST_SOURCES})
 add_dependencies(PESModHost PESModShaders)
 # windowscodecs/ole32: WIC, for writing traced frames out as PNG.
 target_link_libraries(PESModHost PRIVATE Vulkan::Vulkan windowscodecs ole32)
+
+# The Win32 surface declarations are behind a platform macro, and the
+# presenter needs them wherever vulkan.h is first included in this target.
+target_compile_definitions(PESModHost PRIVATE VK_USE_PLATFORM_WIN32_KHR NOMINMAX)
 
 target_include_directories(PESModHost PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

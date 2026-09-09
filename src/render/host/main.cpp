@@ -17,6 +17,7 @@
 #include "vk_alloc.h"
 #include "vk_accel.h"
 #include "vk_raytracer.h"
+#include "vk_present.h"
 #include "vk_textures.h"
 
 #include <windows.h>
@@ -78,6 +79,8 @@ namespace
             "  --save-every <n>   write every nth traced frame, numbered\n"
             "  --save-path <file> where to write it (default traced_frame.png;\n"
             "                     a .ppm extension writes a PPM instead)\n"
+            "  --headless         trace without opening a window (for tests\n"
+            "                     and for saving frames over a recording)\n"
             "  --no-validation    disable Vulkan validation layers\n"
             "  --help\n",
             SceneIPC::kDefaultSectionName);
@@ -1124,6 +1127,9 @@ int main(int argc, char** argv)
     bool        resendTest = false;
     bool        replayTest = false;
     bool        validation = true;
+    // The traced image is the output now, so a window is the default.
+    // Batch work over a recording still wants no window at all.
+    bool        headless = false;
     std::string shaderDirStorage = ResolveShaderDir();
     const char* shaderDir = shaderDirStorage.c_str();
     // Width is not an option because it is not free: the recovered inverse
@@ -1171,6 +1177,7 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--texture-budget") && i + 1 < argc)
             textureBudget = (uint32_t)strtoul(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--save-path") && i + 1 < argc) savePath = argv[++i];
+        else if (!strcmp(argv[i], "--headless")) headless = true;
         else if (!strcmp(argv[i], "--no-validation")) validation = false;
         else if (!strcmp(argv[i], "--help")) { PrintUsage(); return 0; }
         else { printf("unknown argument: %s\n\n", argv[i]); PrintUsage(); return 2; }
@@ -1234,6 +1241,11 @@ int main(int argc, char** argv)
     Host::RayTracer tracer;
     bool tracerTried = false;
 
+    // The window cannot be sized until the first frame says what aspect
+    // ratio the game is rendering at, so it comes up with the tracer.
+    Host::Presenter presenter;
+    bool presenterUp = false;
+
     Host::SceneReceiver rx;
 
     // A recording drives the identical pipeline with no game running,
@@ -1270,6 +1282,15 @@ int main(int argc, char** argv)
     uint64_t reported = 0, skipped = 0;
     while (!g_quit)
     {
+        // Before the poll, and unconditionally: a window that is not
+        // pumped while the host waits for a producer stops responding,
+        // which Windows greys out and reports to the user as a hang.
+        if (presenterUp)
+        {
+            presenter.PumpMessages();
+            if (!presenter.IsOpen()) break;   // closing the window quits
+        }
+
         if (!rx.Poll())
         {
             // A replay that produced no frame has reached the end of
@@ -1326,8 +1347,31 @@ int main(int argc, char** argv)
 
             if (tracer.Init(&gpu, &alloc, shaderDir, w, traceHeight,
                             textures.Capacity()))
-                printf("ray tracer ready: %ux%u (game renders %ux%u)\n\n",
+            {
+                printf("ray tracer ready: %ux%u (game renders %ux%u)\n",
                        w, traceHeight, srcW, srcH);
+
+                // Same size as the traced image, so the first frame is
+                // shown 1:1 and any later stretch is the user resizing.
+                if (!headless)
+                {
+                    if (presenter.Init(&gpu, w, traceHeight,
+                                       "PESMod - ray traced"))
+                    {
+                        presenterUp = true;
+                        printf("window open; close it to stop the host\n");
+                    }
+                    else
+                    {
+                        // Not fatal. Tracing and saving frames still
+                        // work, and the reason is more useful than a
+                        // dead process.
+                        printf("WARNING: no window - %s\n",
+                               presenter.LastError().c_str());
+                    }
+                }
+                printf("\n");
+            }
             else
                 printf("WARNING: ray tracing disabled - %s\n\n",
                        tracer.LastError().c_str());
@@ -1393,6 +1437,21 @@ int main(int argc, char** argv)
                         printf("    image save failed: %s\n",
                                tracer.LastError().c_str());
                 }
+                // Onto the screen. The blit reads the traced image in
+                // VK_IMAGE_LAYOUT_GENERAL and puts it back that way, so
+                // the next Trace finds it as it left it.
+                if (presenterUp && !presenter.Present(tracer.OutputImage(),
+                                                      tracer.Width(),
+                                                      tracer.Height()))
+                {
+                    // A lost or out-of-date swapchain is rebuilt inside
+                    // Present, so reaching here means something the
+                    // presenter could not handle. Say it once and carry
+                    // on tracing rather than tearing the host down.
+                    printf("    present failed: %s\n",
+                           presenter.LastError().c_str());
+                }
+
                 if (!quiet)
                     printf("    trace: %ux%u in %.2f ms\n",
                            tracer.Stats().width, tracer.Stats().height,
@@ -1427,8 +1486,11 @@ int main(int argc, char** argv)
 
     ReportSummary(rx);
 
-    // Explicit, and in reverse order of creation: the tracer holds descriptors
-    // naming the builder TLAS, and both draw memory from the allocator.
+    // Explicit, and in reverse order of creation: the presenter holds a
+    // swapchain whose images the tracer's last blit may still be reading,
+    // the tracer holds descriptors naming the builder TLAS, and both draw
+    // memory from the allocator.
+    presenter.Shutdown();
     tracer.Shutdown();
     textures.Shutdown();
     accel.Shutdown();
