@@ -80,6 +80,16 @@ dom = Counter(i[2].tobytes() for i in instances).most_common(1)[0][0]
 VP = np.frombuffer(dom, dtype=np.float64).reshape(4,4)
 invVP = np.linalg.inv(VP)
 
+# The camera, recovered the way AccelBuilder does: the eye is the world point
+# projecting to clip x = y = w = 0.
+A = np.stack([VP[:3,0], VP[:3,1], VP[:3,3]], axis=0)
+CAM = np.linalg.solve(A, -np.array([VP[3,0], VP[3,1], VP[3,3]]))
+
+# The renderer nudges blended instances toward the viewer by draw order so
+# coplanar decals have a defined order. Without reproducing that here the
+# picker reports a different frontmost surface than the renderer draws.
+DECAL_BIAS, MAX_STEPS = 1.0e-5, 128
+
 # The renderer's ray generation, verbatim.
 ndc = np.array([(PX + 0.5)/W*2.0 - 1.0, 1.0 - (PY_ + 0.5)/H*2.0])
 def unproject(depth):
@@ -116,7 +126,8 @@ def tri_indices(d, ib):
         return np.frombuffer(ib, dtype=dt).astype(np.int64)[:d['icount']].reshape(-1,3)
     return np.arange(d['vcount']//3*3, dtype=np.int64).reshape(-1,3)
 
-best = None
+hits = []       # every surface the ray crosses, not just the first
+decalOrder = 0
 for n, (gid, texid, clip, flags, pal, scale) in enumerate(instances):
     if flags & 0x40:            # kInstanceNoDepthWrite: not in the TLAS
         continue
@@ -126,9 +137,17 @@ for n, (gid, texid, clip, flags, pal, scale) in enumerate(instances):
     if d['vcount'] == 0 or d['stride'] < 12: continue
 
     P = skinned_positions(d, vbytes, pal, scale)
-    Wm = clip @ invVP
-    wp = (np.hstack([P, np.ones((len(P),1))]) @ Wm)[:, :3]
+    Wm = (clip @ invVP).copy()
 
+    if flags & 0x3:                       # blended: biased toward the viewer
+        delta = CAM - Wm[3, :3]
+        length = np.linalg.norm(delta)
+        if length > 1e-3:
+            steps = min(decalOrder, MAX_STEPS)
+            Wm[3, :3] += delta / length * (steps * DECAL_BIAS * length)
+        decalOrder += 1
+
+    wp = (np.hstack([P, np.ones((len(P),1))]) @ Wm)[:, :3]
     tri = tri_indices(d, ib)
     tri = tri[(tri < len(wp)).all(axis=1)]
     if not len(tri): continue
@@ -145,38 +164,44 @@ for n, (gid, texid, clip, flags, pal, scale) in enumerate(instances):
     qv = np.cross(tv, e1)
     vv = (direction*qv).sum(1)*inv
     tt = (e2*qv).sum(1)*inv
-    hit = live & (u>=-1e-6) & (vv>=-1e-6) & (u+vv<=1+1e-6) & (tt>1e-4)
-    if not hit.any(): continue
+    hitmask = live & (u>=-1e-6) & (vv>=-1e-6) & (u+vv<=1+1e-6) & (tt>1e-4)
+    if not hitmask.any(): continue
 
-    # The renderer's any-hit shader ignores a hit whose texture alpha is
-    # below the epsilon, so the picker has to as well or it reports a surface
-    # the ray actually passes straight through.
-    blended = (flags & 0x3) != 0        # alpha blend or alpha test
-    order = np.argsort(np.where(hit, tt, np.inf))
-    for k in order:
-        if not hit[k]: break
-        if blended and texid in texdb and d['uv'] != 0xFFFFFFFF:
-            tw, th, tpx = texdb[texid]
-            ta = np.frombuffer(tpx, dtype=np.uint8).reshape(th, tw, 4)[:, :, 3]
-            base = d['uv'] // 4
-            fl = np.frombuffer(vbytes, dtype='<f4', count=d['vcount']*d['stride']//4)
-            uvs = np.lib.stride_tricks.as_strided(fl[base:], shape=(d['vcount'],2),
-                                                  strides=(d['stride'],4))
-            i0, i1, i2 = tri[k]
-            b1, b2 = u[k], vv[k]
-            uvh = (1-b1-b2)*uvs[i0] + b1*uvs[i1] + b2*uvs[i2]
-            sx = int(np.clip(uvh[0]*tw, 0, tw-1)) if True else 0
-            sy = int(np.clip(uvh[1]*th, 0, th-1))
-            if ta[sy, sx] < 1:
-                continue           # the renderer would step over this one
-        if best is None or tt[k] < best[0]:
-            best = (tt[k], n, gid, texid, flags, d, len(tri))
-        break
+    k = int(np.argmin(np.where(hitmask, tt, np.inf)))
+
+    # Alpha at the hit, the way the any-hit shader reads it.
+    alpha = 255
+    if texid in texdb and d['uv'] != 0xFFFFFFFF:
+        tw, th, tpx = texdb[texid]
+        ta = np.frombuffer(tpx, dtype=np.uint8).reshape(th, tw, 4)[:, :, 3]
+        base = d['uv'] // 4
+        fl = np.frombuffer(vbytes, dtype='<f4', count=d['vcount']*d['stride']//4)
+        uvs = np.lib.stride_tricks.as_strided(fl[base:], shape=(d['vcount'],2),
+                                              strides=(d['stride'],4))
+        i0, i1, i2 = tri[k]
+        b1, b2 = u[k], vv[k]
+        uvh = (1-b1-b2)*uvs[i0] + b1*uvs[i1] + b2*uvs[i2]
+        sx = int(np.clip(uvh[0]*tw, 0, tw-1)); sy = int(np.clip(uvh[1]*th, 0, th-1))
+        alpha = int(ta[sy, sx])
+
+    hits.append((float(tt[k]), n, gid, texid, flags, d, len(tri), alpha))
+
+hits.sort()
+print()
+print('surfaces along the ray at (%d, %d), nearest first:' % (PX, PY_))
+print('%-10s %-6s %-7s %-8s %-7s %-7s %s' %
+      ('t','inst','tex','flags','alpha','tris','geometry'))
+for h in hits[:10]:
+    t, n, gid, texid, flags, d, ntri, alpha = h
+    print('%-10.1f %-6d %-7d 0x%-6X %-7d %-7d %016X' %
+          (t, n, texid, flags, alpha, ntri, gid))
+
+best = hits[0] if hits else None
 
 if best is None:
     print('the ray hit nothing at (%d, %d)' % (PX, PY_))
 else:
-    t, n, gid, texid, flags, d, ntri = best
+    t, n, gid, texid, flags, d, ntri, alpha = best
     print()
     print('pixel (%d, %d) hits instance %d at t = %.1f' % (PX, PY_, n, t))
     print('  geometry   %016X' % gid)

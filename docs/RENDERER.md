@@ -917,10 +917,14 @@ surface using one vanishes — the pitch went twice, once for X8R8G8B8 and
 again for this. They are forced opaque on upload and counted, so the
 per-frame report still says how many.
 
-This is corrected rather than merely reported because the case has one
-meaning left. While A8R8G8B8 and X8R8G8B8 shared a wire code, an empty alpha
-channel was ambiguous between "no alpha" and "wrong format", and silently
-forcing opacity would have hidden the second. X8 has its own code now.
+An A8R8G8B8 texture whose alpha is zero everywhere is a different case and is
+**left alone**. It was briefly forced opaque on the same argument, and that
+was wrong: the game does draw these. They are unused decal slots — a chest
+number a player does not have — blended in and contributing nothing. Forced
+opaque they became solid black patches on players' chests, which took a
+recording, a ray pick and a listing of every surface along the ray to pin
+down. The count remains, because a texture that can never be seen is still
+worth knowing about.
 
 The traced frame is written out by `image_write.cpp` — PNG through WIC by
 default, PPM when the extension asks for it, since the self-test parses the

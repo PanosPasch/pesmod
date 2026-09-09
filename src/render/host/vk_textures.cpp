@@ -218,29 +218,24 @@ bool TextureCache::UploadImage(const SceneIPC::TextureDesc& desc,
     }
     else
     {
-        // An A8R8G8B8 texture whose alpha is zero in every texel of every mip
-        // is a surface the game would be drawing completely invisibly, which
-        // it does not do. It means the game allocated an alpha format and
-        // only ever wrote colour into it - 106 of 3,273 captured textures are
-        // like this - so the channel carries no coverage and the any-hit test
-        // must not read it as such. Left alone, every surface using one
-        // disappears; the pitch did.
+        // An A8R8G8B8 texture whose alpha is zero everywhere is left alone:
+        // it means what it says.
         //
-        // This was previously counted and not corrected, on the grounds that
-        // silently forcing opacity would mask a format mistake. That was the
-        // right call while A8R8G8B8 and X8R8G8B8 shared one wire code and an
-        // empty alpha channel was ambiguous between "no alpha" and "wrong
-        // format". X8 has its own code now, so this case has exactly one
-        // meaning left. The count stays, so it is still visible.
-        uint8_t* p = (uint8_t*)staging.mapped;
+        // This was briefly forced opaque, on the argument that the game
+        // would not draw a surface that is invisible so an empty alpha
+        // channel must mean alpha the texture does not have. That argument
+        // was right about X8R8G8B8, which genuinely has no alpha and now has
+        // its own wire format, and wrong here. The game does draw these:
+        // they are unused decal slots - a chest number a player does not
+        // have - blended in and contributing nothing. Forced opaque they
+        // became solid black patches on players' chests.
+        //
+        // Counted, because a texture that can never be seen is still worth
+        // knowing about.
+        const uint8_t* p = (const uint8_t*)staging.mapped;
         bool anyAlpha = false;
         for (uint64_t b = 3; b < total && !anyAlpha; b += 4) anyAlpha = (p[b] != 0);
-
-        if (!anyAlpha && total)
-        {
-            for (uint64_t b = 3; b < total; b += 4) p[b] = 255;
-            ++m_stats.fullyTransparent;
-        }
+        if (!anyAlpha && total) ++m_stats.fullyTransparent;
     }
 
     VkCommandBufferAllocateInfo cbai{};

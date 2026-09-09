@@ -23,6 +23,10 @@
 // and vanish, which is what happened to the pitch, so those are forced
 // opaque on upload.
 //
+// An A8R8G8B8 texture whose alpha happens to be zero everywhere is *not* the
+// same thing and is left alone. The game draws those - unused decal slots,
+// contributing nothing - and forcing them opaque paints black patches.
+//
 // ── Memory ───────────────────────────────────────────────────────────────
 //
 // One VkDeviceMemory per image. Vulkan caps live allocations
@@ -68,7 +72,7 @@ namespace Host
         uint32_t skippedFormat;     // not BGRA8
         uint32_t skippedFull;       // cache is at capacity
         uint32_t opaqueForced;      // X8R8G8B8: alpha byte is not alpha
-        uint32_t fullyTransparent;  // alpha empty, so forced opaque
+        uint32_t fullyTransparent;  // alpha zero everywhere; drawn as nothing
         uint64_t bytesResident;
     };
 
