@@ -257,6 +257,67 @@ bool AccelBuilder::EnsureScratch(VkDeviceSize bytes)
     return true;
 }
 
+bool AccelBuilder::EnclosesCamera(const Geometry& geo, const Math::Mat4& world)
+{
+    if (!m_haveCameraPos) return false;
+
+    const uint32_t stride = geo.desc.vertexStride;
+    const uint32_t count  = geo.desc.vertexCount;
+    if (stride < 12 || count == 0) return false;
+
+    Bounds& b = m_objectBounds[geo.desc.geometryId];
+    if (b.contentHash != geo.desc.contentHash || (b.lo[0] > b.hi[0]))
+    {
+        b.lo[0] = b.lo[1] = b.lo[2] =  3.4e38f;
+        b.hi[0] = b.hi[1] = b.hi[2] = -3.4e38f;
+
+        const uint8_t* vb = geo.vertices.data();
+        const size_t   have = geo.vertices.size();
+        for (uint32_t v = 0; v < count; ++v)
+        {
+            if ((size_t)v * stride + 12 > have) break;
+            const float* p = (const float*)(vb + (size_t)v * stride);
+            for (int k = 0; k < 3; ++k)
+            {
+                if (p[k] < b.lo[k]) b.lo[k] = p[k];
+                if (p[k] > b.hi[k]) b.hi[k] = p[k];
+            }
+        }
+        b.contentHash = geo.desc.contentHash;
+        if (b.lo[0] > b.hi[0]) return false;   // nothing readable
+    }
+
+    // The eight corners of the object box, transformed, then bounded again.
+    // A box of a rotated box is looser than the true bound, which is the safe
+    // direction here: it can only make the test less willing to call
+    // something the sky.
+    float lo[3] = {  3.4e38f,  3.4e38f,  3.4e38f };
+    float hi[3] = { -3.4e38f, -3.4e38f, -3.4e38f };
+    for (int corner = 0; corner < 8; ++corner)
+    {
+        const float x = (corner & 1) ? b.hi[0] : b.lo[0];
+        const float y = (corner & 2) ? b.hi[1] : b.lo[1];
+        const float z = (corner & 4) ? b.hi[2] : b.lo[2];
+
+        // Row-vector, as everywhere else on this path.
+        const float w[3] = {
+            x * world.m[0] + y * world.m[4] + z * world.m[8]  + world.m[12],
+            x * world.m[1] + y * world.m[5] + z * world.m[9]  + world.m[13],
+            x * world.m[2] + y * world.m[6] + z * world.m[10] + world.m[14]
+        };
+        for (int k = 0; k < 3; ++k)
+        {
+            if (w[k] < lo[k]) lo[k] = w[k];
+            if (w[k] > hi[k]) hi[k] = w[k];
+        }
+    }
+
+    const float eye[3] = { m_cameraPos.x, m_cameraPos.y, m_cameraPos.z };
+    for (int k = 0; k < 3; ++k)
+        if (eye[k] < lo[k] || eye[k] > hi[k]) return false;
+    return true;
+}
+
 bool AccelBuilder::PrepareMeshBlas(const Geometry& geo, MeshBlas& out,
                                    PendingBuild& job,
                                    const std::vector<float>* palette,
@@ -890,11 +951,8 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
     {
         const InstanceDesc& inst = frame.instances[i];
 
-        // Geometry the game refuses to let occlude anything must not go into
-        // the TLAS, because a ray tracer would let it occlude everything.
-        // The sky is a small dome around the camera; the stadium is thousands
-        // of units away. See kInstanceNoDepthWrite.
-        if (inst.flags & kInstanceNoDepthWrite) { ++m_stats.nonOccluding; continue; }
+        const bool nonOccluding = (inst.flags & kInstanceNoDepthWrite) != 0;
+        if (nonOccluding) ++m_stats.nonOccluding;
 
         const Geometry* geo = scene.FindGeometry(inst.geometryId);
         if (!geo) { ++m_stats.geometryUnresolved; continue; }
@@ -909,7 +967,18 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
         const uint32_t triangles = TriangleCountOf(*geo);
         if (triangles == 0) continue;
 
-        if (triangles <= kSpriteTriangleLimit)
+        // The sky is the one non-occluding draw that cannot simply be let in:
+        // its box contains the camera, so a primary ray would hit it before
+        // anything else. It goes in on its own mask instead, where only the
+        // miss path can see it.
+        const bool isSky = nonOccluding && EnclosesCamera(*geo, world);
+        if (isSky) ++m_stats.skyDraws;
+
+        const uint32_t rayMask = isSky ? (uint32_t)kMaskSky
+                               : nonOccluding ? (uint32_t)kMaskNonOccluding
+                                              : (uint32_t)kMaskSolid;
+
+        if (!isSky && triangles <= kSpriteTriangleLimit)
         {
             // Expand the indices and transform to world on the CPU. At a
             // couple of triangles apiece this is far cheaper than an
@@ -1049,6 +1118,7 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
         rec.samplerIndex = SamplerIndexForAddress(inst.textureAddress);
         rec.flags = (inst.flags & (kInstanceAlphaBlend | kInstanceAlphaTest))
                   ? kRecordBlended : 0u;
+        if (isSky) rec.flags |= kRecordUnlit;
         memcpy(rec.baseColor, inst.baseColorFactor, sizeof(rec.baseColor));
 
         // ── Coplanar decals: separate them by draw order ─────────────────
@@ -1092,10 +1162,10 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
         Math::ToVkTransform(world, &out.transform.matrix[0][0]);
         out.instanceCustomIndex                    = (uint32_t)records.size() & 0xFFFFFF;
         records.push_back(rec);
-        out.mask                                   = 0xFF;
         out.instanceShaderBindingTableRecordOffset = 0;
         out.flags = (inst.flags & kInstanceTwoSided)
                   ? VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR : 0;
+        out.mask  = rayMask;
 
         // Anything the game drew without blending or alpha testing is a solid
         // surface, and forcing it opaque skips the any-hit shader entirely -
@@ -1142,7 +1212,14 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
         Math::ToVkTransform(Math::Identity(), &out.transform.matrix[0][0]);
         out.instanceCustomIndex = (uint32_t)records.size() & 0xFFFFFF;
         records.push_back(rec);
-        out.mask  = 0xFF;
+
+        // kMaskSolid, not kMaskPrimary: the batch mixes occluding and
+        // non-occluding draws into one structure, so it cannot express
+        // per-triangle shadow visibility. Casting shadows is what it did
+        // before masks existed, so this changes nothing; splitting the
+        // merge in two is what would fix it.
+        out.mask  = kMaskSolid;
+
         // Deliberately not FORCE_OPAQUE: the batch has UVs now, and the
         // shadows and netting among it are mostly empty texture.
         out.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;

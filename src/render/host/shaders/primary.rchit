@@ -88,6 +88,19 @@ void main()
             surfaceAlpha = sampled.a * rec.baseColor.a;
     }
 
+    // ── Unlit surfaces stop here ─────────────────────────────────────────
+    // The sky is a pre-lit texture on a box around the camera. It has no
+    // meaningful normal, wants no shadow ray, and must not be run through the
+    // stadium's lighting rig - and returning before the recursive trace is
+    // also what keeps the sky lookup from adding a level of recursion.
+    if ((rec.flags & kRecordUnlit) != 0u)
+    {
+        payload.colour = albedo;
+        payload.alpha  = surfaceAlpha;
+        payload.dist   = gl_HitTEXT;
+        return;
+    }
+
     // ── Normals ──────────────────────────────────────────────────────────
     // The game supplies none for its 24-byte pre-lit vertex layout, so a
     // geometric normal is derived from the triangle itself. Position fetch
@@ -151,7 +164,7 @@ void main()
         traceRayEXT(topLevel,
                     gl_RayFlagsTerminateOnFirstHitEXT |
                     gl_RayFlagsSkipClosestHitShaderEXT,
-                    0xFF,
+                    kMaskShadow,   // overlays write no depth, so cast none
                     0,          // sbtRecordOffset
                     0,          // sbtRecordStride
                     1,          // missIndex: the shadow miss shader

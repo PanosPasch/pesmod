@@ -45,7 +45,7 @@ void main()
         // decided per instance by the builder.
         traceRayEXT(topLevel,
                     0,
-                    0xFF,          // cull mask
+                    kMaskPrimary,  // the sky is not among these
                     0,             // sbtRecordOffset
                     0,             // sbtRecordStride
                     0,             // missIndex: the sky shader
@@ -55,7 +55,29 @@ void main()
 
         if (payload.dist < 0.0)
         {
-            // The background closes the ray out, whatever is left of it.
+            // ── The background ───────────────────────────────────────────
+            //
+            // The game's sky is a textured box around the camera, drawn with
+            // depth writes off. It cannot be traced with everything else -
+            // it encloses the viewer, so every primary ray would hit it
+            // first - so it sits on its own mask and is looked up here,
+            // once, after the scene has been exhausted.
+            //
+            // This is a second trace from the ray generation rather than one
+            // from inside the miss shader, which keeps the recursion depth
+            // at two: the sky's record is unlit, so its hit shader traces
+            // nothing. If the box does not cover this direction - or there
+            // is no sky in the scene at all, as on the menus - the same miss
+            // shader runs again and leaves its gradient, which is the right
+            // fallback and cannot recurse.
+            traceRayEXT(topLevel,
+                        gl_RayFlagsOpaqueEXT,   // the box is solid
+                        kMaskSky,
+                        0, 0, 0,
+                        origin, tmin,
+                        dir, 1.0e9,
+                        0);
+
             accumulated += transmittance * payload.colour;
             transmittance = 0.0;
             break;

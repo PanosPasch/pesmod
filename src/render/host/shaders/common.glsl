@@ -52,12 +52,30 @@ struct InstanceRecord
     uint     _pad0, _pad1;
 };
 
+// ── Ray masks ────────────────────────────────────────────────────────────
+//
+// "Depth writes off" is the game saying a draw must not occlude anything.
+// A mask says exactly that: an overlay is visible to the eye and invisible
+// to a shadow ray. The sky is visible to neither, and is looked up on its
+// own when a primary ray reaches the miss shader. Mirrors
+// AccelBuilder::RayMask.
+const uint kMaskSolid        = 0x01u;
+const uint kMaskNonOccluding = 0x02u;
+const uint kMaskSky          = 0x04u;
+const uint kMaskPrimary      = kMaskSolid | kMaskNonOccluding;
+const uint kMaskShadow       = kMaskSolid;
+
 const uint kRecordBlended    = 1u;
 
 // This record covers the merged sprite batch. Its triangles came from many
 // different draws, so the record itself carries no usable material; the
 // per-triangle table below does.
 const uint kRecordSpriteBatch = 2u;
+
+// Shade with the texture alone - no normal, no shadow ray, no lighting rig.
+// The sky is a pre-lit texture, so running the stadium's light over it would
+// light the thing that is the light.
+const uint kRecordUnlit       = 4u;
 
 // ── The primary ray payload ──────────────────────────────────────────────
 //

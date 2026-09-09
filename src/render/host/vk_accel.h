@@ -64,7 +64,43 @@ namespace Host
         // This record covers the merged sprite batch, whose triangles
         // came from many draws. Its material is per triangle, in the
         // SpriteTriangle table, not in the record.
-        kRecordSpriteBatch = 1u << 1
+        kRecordSpriteBatch = 1u << 1,
+
+        // Shade with the texture alone: no normal, no shadow ray, no
+        // lighting rig. The sky is a pre-lit texture on a box, and running
+        // the stadium's directional and hemisphere terms over it would light
+        // a thing that is already the light.
+        kRecordUnlit = 1u << 2
+    };
+
+    // ── Ray masks ────────────────────────────────────────────────────────
+    //
+    // "Depth writes off" is the game saying a draw must not occlude anything.
+    // Dropping those draws entirely was the first answer to that, and it cost
+    // the stadium surround, the athletics track and the projected shadows -
+    // sixty-eight draws a frame, most of which belong in the picture and only
+    // one of which is actually the sky.
+    //
+    // A mask says it properly: which rays can see an instance at all. A
+    // non-occluding overlay is visible to the eye and invisible to a shadow
+    // ray, which is exactly what a surface that writes no depth means. The
+    // sky is visible to neither, and is looked up on its own.
+    enum RayMask : uint32_t
+    {
+        // Ordinary geometry: seen by the eye, and casts shadows.
+        kMaskSolid = 0x01,
+
+        // Drawn with depth writes off: seen by the eye, casts no shadow.
+        kMaskNonOccluding = 0x02,
+
+        // The sky. Its box encloses the camera and every other surface, so a
+        // ray that could see it would see nothing else; only the miss path
+        // looks it up.
+        kMaskSky = 0x04,
+
+        // What a primary ray traces against, and what a shadow ray does.
+        kMaskPrimary = kMaskSolid | kMaskNonOccluding,
+        kMaskShadow  = kMaskSolid
     };
 
     // A draw at or below this many triangles is treated as a sprite and
@@ -86,7 +122,8 @@ namespace Host
         uint32_t vpSampleSize;
         const char* vpSource;           // where the winning VP came from
         uint32_t geometryUnresolved;    // instance referenced missing geometry
-        uint32_t nonOccluding;          // skipped: drawn with depth writes off
+        uint32_t nonOccluding;          // drawn with depth writes off
+        uint32_t skyDraws;              // of those, the ones enclosing the camera
         uint32_t skinnedRebuilds;       // structures rebuilt because the pose moved
 
         // Structures thrown away and recreated because the driver asked
@@ -144,6 +181,10 @@ namespace Host
 
         // Drops persistent structures whose geometry is no longer resident.
         void PruneOrphans(const SceneReceiver& scene);
+
+        // True while a frame has produced a camera position, which the sky
+        // test and the decal bias both need.
+        bool HaveCameraPos() const { return m_haveCameraPos; }
 
     public:
         // What the hit shader needs to shade a surface it did not know it
@@ -272,6 +313,23 @@ namespace Host
             VkDeviceSize                                scratchOffset;
         };
 
+        // An object-space bounding box, cached per geometry because it takes
+        // a pass over the vertices and the sky is drawn every frame from the
+        // same mesh.
+        struct Bounds
+        {
+            float    lo[3];
+            float    hi[3];
+            uint32_t contentHash;
+        };
+
+        // Whether this draw is the sky: its box, in world space, contains the
+        // camera. Nothing else in the scene does - the stadium surrounds the
+        // pitch but not the camera, which sits above and behind it - and a
+        // surface enclosing the viewer would occlude everything else if it
+        // were traced normally.
+        bool EnclosesCamera(const Geometry& geo, const Math::Mat4& world);
+
         // `palette` is the instance's bone pose, or null for a rigid mesh.
         // Skinning happens during the copy into the BLAS buffer, since that
         // pass has to touch every vertex anyway.
@@ -322,6 +380,7 @@ namespace Host
         VkCommandPool  m_commandPool;
 
         std::unordered_map<uint64_t, MeshBlas> m_meshBlas;
+        std::unordered_map<uint64_t, Bounds>   m_objectBounds;
 
         Accel      m_spriteBlas;
         GpuBuffer  m_spriteVertices;

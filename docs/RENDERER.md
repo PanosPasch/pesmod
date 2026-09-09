@@ -936,20 +936,20 @@ pixels back and Windows will not preview a PPM.
 
 Done: the transport, the device, scene reconstruction, acceleration
 structures, a ray tracing pipeline that traces every live frame, ordered
-transparency by depth peeling, per-sprite materials, and a window of its own
-to put the result in. What remains is what turns a correct image into a
-better one than the game's.
+transparency by depth peeling, per-sprite materials, ray masks that put the
+game's non-occluding draws and its own textured sky back in the picture, and
+a window of its own to put the result in. What remains is what turns a
+correct image into a better one than the game's.
 
 1. **Normals.** Currently geometric, so everything is faceted. The 32-byte
    layout carries real per-vertex normals; they have to be carried through
    the scene stream and interpolated in the hit shader.
-2. **The sky.** The game's sky is a textured dome the builder keeps out of
-   the TLAS, because at roughly 75 units from the camera it would occlude
-   the whole stadium. The miss shader currently returns a gradient between
-   the game's own sky and ground colours; sampling that dome by ray
-   direction instead would be the game's actual sky, at no traversal cost.
-3. **Overlap.** Every submit is followed by `vkQueueWaitIdle`, so structure
+2. **Overlap.** Every submit is followed by `vkQueueWaitIdle`, so structure
    builds and traces are fully serialised. Fences would let them overlap.
+3. **Shadow visibility inside the merged sprite batch.** The batch mixes
+   occluding and non-occluding draws into one structure, so it carries one
+   ray mask for all of them and its projected shadows cast shadows of their
+   own. Splitting the merge in two would fix it.
 4. **Lighting beyond the game's rig.** The captured constants are the seed —
    directional `c95`/`c94`, hemisphere `c93`/`c92`/`c91`, specular
    `c63`/`c70` — then physical stadium floodlights and a sky model.
