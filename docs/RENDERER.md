@@ -790,6 +790,18 @@ Two orientation hazards, both silent when wrong:
   scene has y >= 0 and the test camera only scales, so all of the geometry
   must land above the midline.
 
+**An empty alpha channel is not transparency.** 106 of 3,273 captured
+textures are A8R8G8B8 with alpha zero in every texel: the game allocated an
+alpha format and only ever wrote colour into it. Read as coverage, every
+surface using one vanishes — the pitch went twice, once for X8R8G8B8 and
+again for this. They are forced opaque on upload and counted, so the
+per-frame report still says how many.
+
+This is corrected rather than merely reported because the case has one
+meaning left. While A8R8G8B8 and X8R8G8B8 shared a wire code, an empty alpha
+channel was ambiguous between "no alpha" and "wrong format", and silently
+forcing opacity would have hidden the second. X8 has its own code now.
+
 The traced frame is written out by `image_write.cpp` — PNG through WIC by
 default, PPM when the extension asks for it, since the self-test parses the
 pixels back and Windows will not preview a PPM.

@@ -353,10 +353,13 @@ namespace
         // would never reach the any-hit shader.
         {
             struct LitVertex { float px, py, pz, nx, ny, nz, u, v; };
+            // Every UV is the same point, well inside the transparent
+            // region, so the alpha test's outcome does not depend on where
+            // in the triangle the ray happened to land.
             LitVertex verts[6] = {
-                { 0,0,0, 0,0,1, 0,0 }, { 4,0,0, 0,0,1, 1,0 },
-                { 4,4,0, 0,0,1, 1,1 }, { 0,4,0, 0,0,1, 0,1 },
-                { 0,0,1, 0,0,1, 0,0 }, { 4,0,1, 0,0,1, 1,0 },
+                { 0,0,0, 0,0,1, 0.1f,0.1f }, { 4,0,0, 0,0,1, 0.1f,0.1f },
+                { 4,4,0, 0,0,1, 0.1f,0.1f }, { 0,4,0, 0,0,1, 0.1f,0.1f },
+                { 0,0,1, 0,0,1, 0.1f,0.1f }, { 4,0,1, 0,0,1, 0.1f,0.1f },
             };
             uint16_t idx[12] = { 0,1,2,  0,2,3,  0,1,4,  1,5,4 };
 
@@ -399,6 +402,13 @@ namespace
                 texels[i + 2] = 255;   // R
                 texels[i + 3] = 0;     // A - the whole point
             }
+            // One opaque texel, in the corner the sheet never samples.
+            // Without it the whole channel is empty, and the cache now reads
+            // that as "this format carries no alpha" and forces it opaque -
+            // correctly, because that is what the game's own textures mean by
+            // it. A texture that is transparent *somewhere* is the realistic
+            // case and the one worth testing.
+            texels[(td.payloadBytes - 4) + 3] = 255;
             producer.TryWrite(SceneIPC::kMsgTexture, &td, sizeof(td),
                               texels.data(), td.payloadBytes, false);
         }

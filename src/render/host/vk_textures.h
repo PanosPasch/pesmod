@@ -52,7 +52,7 @@ namespace Host
         uint32_t skippedFormat;     // not BGRA8
         uint32_t skippedFull;       // cache is at capacity
         uint32_t opaqueForced;      // X8R8G8B8: alpha byte is not alpha
-        uint32_t fullyTransparent;  // suspicious: alpha zero everywhere
+        uint32_t fullyTransparent;  // alpha empty, so forced opaque
         uint64_t bytesResident;
     };
 
