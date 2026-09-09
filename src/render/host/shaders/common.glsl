@@ -48,8 +48,37 @@ struct InstanceRecord
     uint     textureSlot;
     vec4     baseColor;
     uint     samplerIndex;   // addressing belongs to the draw, not the image
-    uint     _pad0, _pad1, _pad2;
+    uint     flags;          // kRecordBlended
+    uint     _pad0, _pad1;
 };
+
+const uint kRecordBlended = 1u;
+
+// ── The primary ray payload ──────────────────────────────────────────────
+//
+// The game composites its blended surfaces in draw order, so taking the
+// nearest hit and shading it opaquely is wrong wherever anything is drawn
+// over anything else - pitch markings, shirt numbers, projected shadows.
+//
+// So the hit shader reports what it found rather than a final colour, and the
+// ray generation peels layers front to back, accumulating
+// `colour * alpha * transmittance` and attenuating the transmittance as it
+// goes. Accumulating front to back with a running transmittance is exactly
+// equivalent to compositing back to front, and needs no sorting.
+//
+// `dist` is negative when nothing was hit, which is how the miss shader says
+// "this is the background, stop here".
+struct HitPayload
+{
+    vec3  colour;
+    float alpha;
+    float dist;
+};
+
+// How many blended surfaces a single ray will composite before giving up.
+// The pitch is seven coplanar layers, so this has to be comfortably more
+// than that; beyond it the remaining transmittance is simply dropped.
+const int kMaxLayers = 12;
 
 layout(binding = 0, set = 0) uniform accelerationStructureEXT topLevel;
 layout(binding = 1, set = 0, rgba8) uniform image2D outputImage;
@@ -136,13 +165,17 @@ vec2 HitUv(InstanceRecord rec, uint primitiveID, vec2 bary2)
          + bary.z * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.z);
 }
 
-// Below this the surface is treated as absent rather than shaded. Chosen
-// against the game's own pitch layers: of the seven coplanar draws covering
-// the pitch, the two that are pure noise in a ray tracer have maximum alphas
-// of 0.14 and 0.25, while the grass base is 1.0 everywhere.
+// Below this a texel is treated as absent rather than composited. It is
+// deliberately near zero: partial alpha is now composited by the ray
+// generation rather than tested away, and the only thing worth rejecting
+// outright is a texel that would contribute nothing while consuming one of
+// the peeling layers. Of the game's seven coplanar pitch layers, two are
+// entirely below this.
+// Matches SceneIPC::kNoVertexAttribute: the offset a geometry reports for
+// an attribute it does not have.
 const uint kNoVertexAttribute = 0xFFFFFFFFu;
 
-const float kAlphaCutoff = 0.5;
+const float kAlphaEpsilon = 1.0 / 255.0;
 
 // Unprojects a point on the near or far plane back into world space.
 // D3D depth runs 0 at the near plane to 1 at the far plane, which is what

@@ -23,7 +23,7 @@
 // This runs only for instances the builder marked non-opaque; anything the
 // game drew without blending carries FORCE_OPAQUE and never reaches here.
 
-layout(location = 0) rayPayloadInEXT vec3 hitColor;
+layout(location = 0) rayPayloadInEXT HitPayload payload;
 
 hitAttributeEXT vec2 attribs;
 
@@ -44,5 +44,13 @@ void main()
     // tracing stage has no derivatives.
     const float alpha = SampleInstance(rec, uv).a * rec.baseColor.a;
 
-    if (alpha < kAlphaCutoff) ignoreIntersectionEXT;
+    // Only genuinely empty texels are stepped over now. Partial alpha used
+    // to be rejected here, which is a binary decision and the reason
+    // markings and shirt numbers were all-or-nothing; it is the ray
+    // generation that composites them, so anything with any coverage at all
+    // has to reach the closest-hit shader.
+    //
+    // Rejecting the empty texels still matters: it is what keeps the pitch's
+    // fully transparent overlays from consuming peeling layers.
+    if (alpha < kAlphaEpsilon) ignoreIntersectionEXT;
 }

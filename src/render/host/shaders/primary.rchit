@@ -4,7 +4,7 @@
 #extension GL_EXT_ray_tracing_position_fetch : require
 #include "common.glsl"
 
-layout(location = 0) rayPayloadInEXT vec3 hitColor;
+layout(location = 0) rayPayloadInEXT HitPayload payload;
 layout(location = 1) rayPayloadEXT   float shadowVisibility;
 
 hitAttributeEXT vec2 attribs;
@@ -31,6 +31,11 @@ void main()
     // texture slot it uses; nothing about the surface was known before the
     // ray landed on it.
     const InstanceRecord rec = instances[gl_InstanceCustomIndexEXT];
+
+    // Opaque surfaces replace what is behind them; blended ones composite,
+    // and their alpha is the texture's times the draw's tint. An opaque
+    // surface reports 1 so the ray generation stops there.
+    float surfaceAlpha = 1.0;
 
     vec3 albedo = rec.baseColor.rgb;
     if (rec.vertexAddress != 0ul && rec.uvOffset != kNoVertexAttribute)
@@ -63,7 +68,10 @@ void main()
         // LOD 0 rather than an implicit level: a ray tracing stage has no
         // derivatives. It is sharp and will alias in the distance; choosing
         // a level from ray differentials is the proper fix and comes later.
-        albedo *= SampleInstance(rec, uv).rgb;
+        const vec4 sampled = SampleInstance(rec, uv);
+        albedo *= sampled.rgb;
+        if ((rec.flags & kRecordBlended) != 0u)
+            surfaceAlpha = sampled.a * rec.baseColor.a;
     }
 
     // ── Normals ──────────────────────────────────────────────────────────
@@ -80,7 +88,17 @@ void main()
     const vec3 p1 = gl_HitTriangleVertexPositionsEXT[1];
     const vec3 p2 = gl_HitTriangleVertexPositionsEXT[2];
 
-    const vec3 objectNormal = normalize(cross(p1 - p0, p2 - p0));
+    // A zero-area triangle makes cross() zero and normalize() NaN, and NaN
+    // survives every later multiply to be clamped to black at the end - a
+    // solid dark patch on an otherwise correct surface, with no error
+    // anywhere. Skinned meshes collapse triangles routinely when several
+    // influences pull a vertex onto its neighbour, so this is not a rare
+    // case; it accounted for the dark quads on players' chests.
+    const vec3  crossed = cross(p1 - p0, p2 - p0);
+    const float area2   = length(crossed);
+    const vec3  objectNormal = (area2 > 1e-20)
+                             ? crossed / area2
+                             : -normalize(gl_WorldRayDirectionEXT);
 
     // Object-to-world for normals is the inverse transpose, but the game's
     // transforms are rigid plus uniform scale, so the 3x3 suffices once
@@ -137,5 +155,7 @@ void main()
     // colour. It already contains the game's own baked lighting, so folding
     // it in here would light the scene twice — see docs/RENDERER.md 4.3.
 
-    hitColor = albedo * lit;
+    payload.colour = albedo * lit;
+    payload.alpha  = surfaceAlpha;
+    payload.dist   = gl_HitTEXT;
 }

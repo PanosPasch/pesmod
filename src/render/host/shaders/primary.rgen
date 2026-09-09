@@ -3,7 +3,7 @@
 #extension GL_GOOGLE_include_directive : require
 #include "common.glsl"
 
-layout(location = 0) rayPayloadEXT vec3 hitColor;
+layout(location = 0) rayPayloadEXT HitPayload payload;
 
 void main()
 {
@@ -25,25 +25,57 @@ void main()
     const vec3 target = UnprojectToWorld(ndc, 1.0);
     const vec3 dir    = normalize(target - origin);
 
-    hitColor = vec3(0.0);
+    // ── Peel the transparent layers, front to back ───────────────────────
+    // See HitPayload in common.glsl for why this is a loop rather than one
+    // trace: the game composites blended surfaces in draw order and shading
+    // only the nearest one paints markings, shirt numbers and shadows as
+    // solid patches.
+    vec3  accumulated  = vec3(0.0);
+    float transmittance = 1.0;
+    float tmin = 0.0;
 
-    // No gl_RayFlagsOpaqueEXT here. That flag forces every hit to be treated
-    // as opaque, which skips the any-hit shader and with it the alpha test -
-    // and the alpha test is what stops the pitch's blended overlays from
-    // fighting the grass they share a plane with. Opacity is decided per
-    // instance by the builder instead.
-    traceRayEXT(topLevel,
-                0,
-                0xFF,          // cull mask
-                0,             // sbtRecordOffset
-                0,             // sbtRecordStride
-                0,             // missIndex: the sky shader
-                origin, 0.0,
-                dir, 1.0e9,
-                0);            // payload location
+    for (int layer = 0; layer < kMaxLayers; ++layer)
+    {
+        payload.colour = vec3(0.0);
+        payload.alpha  = 0.0;
+        payload.dist   = -1.0;
+
+        // No gl_RayFlagsOpaqueEXT: that flag forces every hit opaque, which
+        // skips the any-hit shader and with it the alpha test. Opacity is
+        // decided per instance by the builder.
+        traceRayEXT(topLevel,
+                    0,
+                    0xFF,          // cull mask
+                    0,             // sbtRecordOffset
+                    0,             // sbtRecordStride
+                    0,             // missIndex: the sky shader
+                    origin, tmin,
+                    dir, 1.0e9,
+                    0);            // payload location
+
+        if (payload.dist < 0.0)
+        {
+            // The background closes the ray out, whatever is left of it.
+            accumulated += transmittance * payload.colour;
+            transmittance = 0.0;
+            break;
+        }
+
+        const float a = clamp(payload.alpha, 0.0, 1.0);
+        accumulated   += transmittance * a * payload.colour;
+        transmittance *= (1.0 - a);
+
+        // Nothing behind this can still be seen.
+        if (transmittance < 1.0 / 255.0) break;
+
+        // Resume just past the hit. The offset scales with distance because
+        // floating-point precision does: a fixed epsilon either re-hits the
+        // same surface far away or skips past a near one.
+        tmin = payload.dist * (1.0 + 1.0e-5) + 1.0e-3;
+    }
 
     const float exposure = max(scene.params.y, 1e-3);
-    vec3 color = hitColor * exposure;
+    vec3 color = accumulated * exposure;
 
     // The game's colours are already in low dynamic range, so this is a
     // gamma encode rather than a tonemap; anything stronger would crush the

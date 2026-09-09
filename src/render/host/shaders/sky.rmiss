@@ -3,7 +3,7 @@
 #extension GL_GOOGLE_include_directive : require
 #include "common.glsl"
 
-layout(location = 0) rayPayloadInEXT vec3 hitColor;
+layout(location = 0) rayPayloadInEXT HitPayload payload;
 
 void main()
 {
@@ -29,6 +29,11 @@ void main()
     const float t = clamp(dot(dir, normalize(scene.hemisphereAxis.xyz)) * 0.5 + 0.5,
                           0.0, 1.0);
 
-    hitColor = mix(scene.groundColor.rgb, scene.skyColor.rgb, t) *
-               scene.lightingScale.rgb + scene.ambient.rgb;
+    payload.colour = mix(scene.groundColor.rgb, scene.skyColor.rgb, t) *
+                     scene.lightingScale.rgb + scene.ambient.rgb;
+    payload.alpha  = 1.0;
+
+    // Negative distance is how the ray generation knows this is the
+    // background and that there is nothing further to peel.
+    payload.dist   = -1.0;
 }

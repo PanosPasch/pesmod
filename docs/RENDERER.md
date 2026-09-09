@@ -771,6 +771,47 @@ VUID named it outright.
 
 ---
 
+### 6.7 Ordered transparency
+
+The game composites blended surfaces in draw order. Taking the nearest hit
+and shading it opaquely is wrong wherever anything is drawn over anything
+else, which is most decoration: pitch markings, shirt numbers, projected
+shadows. Alpha testing made those all-or-nothing rather than blended.
+
+Two things are needed, and neither is sufficient alone.
+
+**Peeling.** The hit shader now reports what it found - colour, alpha and
+distance - instead of a final colour, and the ray generation peels up to
+twelve layers front to back, accumulating `colour * alpha * transmittance`
+and attenuating the transmittance as it goes. Accumulating front to back
+with a running transmittance is exactly equivalent to compositing back to
+front, and needs no sorting. A negative distance is how the miss shader says
+"background, stop here". The `tmin` for the next layer scales with the hit
+distance, because floating-point precision does: a fixed epsilon either
+re-hits the same surface far away or steps past a near one.
+
+The any-hit shader no longer alpha *tests* for primary rays - a binary
+decision is the thing being replaced - but it still rejects texels below
+1/255, which is what keeps the pitch's fully transparent overlays from
+consuming peeling layers.
+
+**Draw order.** Peeling orders by distance, and the decals are exactly
+coplanar with what they decorate: seven pitch layers share one plane, and at
+equal depth the traversal order is arbitrary and varies per ray. So each
+blended instance is nudged toward the viewer by an amount that grows with
+its position in the frame, making the later draw the nearer one - painter's
+order expressed as depth. Opaque geometry never moves.
+
+The step is a fraction of the distance to the camera, because precision is
+too. Measured on a recorded frame, the pitch's neighbour-to-neighbour
+variation falls from 15.1 at 1e-6 to 8.1 at 1e-5; at 1e-4 it rises to 11.6,
+by which point the decals are far enough off their base surface to be wrong
+in a new way. The camera position that this is measured from is recovered
+from the winning view-projection: the eye is the world point that projects
+to clip x = y = w = 0.
+
+---
+
 ### 6.7 Coplanar layers, and why the pitch was noise
 
 The game builds its pitch from **seven draws that all lie on the same

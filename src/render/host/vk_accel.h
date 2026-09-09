@@ -54,6 +54,14 @@ namespace Host
     void SkinVertices(const Geometry& geo, const std::vector<float>& palette,
                       float indexScale, uint8_t* dst);
 
+    // InstanceRecord::flags, mirrored in shaders/common.glsl.
+    enum RecordFlags : uint32_t
+    {
+        // The surface composites over what is behind it rather than replacing
+        // it, so the ray has to continue past it and its alpha is meaningful.
+        kRecordBlended = 1u << 0
+    };
+
     // A draw at or below this many triangles is treated as a sprite and
     // merged rather than given its own acceleration structure. Two triangles
     // covers the quads that dominate the stream; the limit is deliberately
@@ -146,7 +154,12 @@ namespace Host
             // Which sampler pairs with that texture. Addressing belongs to
             // the draw, not the image, so it travels with the instance.
             uint32_t samplerIndex;
-            uint32_t _pad0, _pad1, _pad2;
+
+            // kRecord* below. Whether a surface composites or replaces what
+            // is behind it is a property of the draw, and the hit shader
+            // cannot ask the instance flags directly.
+            uint32_t flags;
+            uint32_t _pad0, _pad1;
         };
 
         static_assert(sizeof(InstanceRecord) == 64,
@@ -155,6 +168,8 @@ namespace Host
         static_assert(offsetof(InstanceRecord, baseColor)    == 32,
                       "vec4 is 16-byte aligned in std430");
         static_assert(offsetof(InstanceRecord, samplerIndex) == 48,
+                      "InstanceRecord must match shaders/common.glsl");
+        static_assert(offsetof(InstanceRecord, flags)        == 52,
                       "InstanceRecord must match shaders/common.glsl");
 
     private:
@@ -273,6 +288,12 @@ namespace Host
         // answer is the best first guess for this one.
         Math::Mat4  m_vpHint;
         Math::Mat4  m_lastInverseVp;
+
+        // Recovered from the winning view-projection. Used to bias coplanar
+        // decals toward the viewer by draw order; see kDecalBias.
+        struct Vec3 { float x, y, z; };
+        Vec3        m_cameraPos;
+        bool        m_haveCameraPos;
         bool        m_haveVpHint;
 
         AccelStats  m_stats;

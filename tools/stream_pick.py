@@ -149,7 +149,7 @@ for n, (gid, texid, clip, flags, pal, scale) in enumerate(instances):
     if not hit.any(): continue
 
     # The renderer's any-hit shader ignores a hit whose texture alpha is
-    # below the cutoff, so the picker has to as well or it reports a surface
+    # below the epsilon, so the picker has to as well or it reports a surface
     # the ray actually passes straight through.
     blended = (flags & 0x3) != 0        # alpha blend or alpha test
     order = np.argsort(np.where(hit, tt, np.inf))
@@ -167,7 +167,7 @@ for n, (gid, texid, clip, flags, pal, scale) in enumerate(instances):
             uvh = (1-b1-b2)*uvs[i0] + b1*uvs[i1] + b2*uvs[i2]
             sx = int(np.clip(uvh[0]*tw, 0, tw-1)) if True else 0
             sy = int(np.clip(uvh[1]*th, 0, th-1))
-            if ta[sy, sx] < 128:
+            if ta[sy, sx] < 1:
                 continue           # the renderer would step over this one
         if best is None or tt[k] < best[0]:
             best = (tt[k], n, gid, texid, flags, d, len(tri))

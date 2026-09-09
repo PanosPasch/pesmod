@@ -587,13 +587,15 @@ namespace
         // would never reach the any-hit shader.
         {
             struct LitVertex { float px, py, pz, nx, ny, nz, u, v; };
-            // Every UV is the same point, well inside the transparent
-            // region, so the alpha test's outcome does not depend on where
-            // in the triangle the ray happened to land.
+            // Every UV is the same point, so the outcome does not depend on
+            // where in the triangle the ray landed. The centre rather than a
+            // corner: this texture has one opaque texel in a corner, and
+            // bilinear filtering with wrap addressing bleeds it across the
+            // seam into any UV within half a texel of an edge.
             LitVertex verts[6] = {
-                { 0,0,0, 0,0,1, 0.1f,0.1f }, { 4,0,0, 0,0,1, 0.1f,0.1f },
-                { 4,4,0, 0,0,1, 0.1f,0.1f }, { 0,4,0, 0,0,1, 0.1f,0.1f },
-                { 0,0,1, 0,0,1, 0.1f,0.1f }, { 4,0,1, 0,0,1, 0.1f,0.1f },
+                { 0,0,0, 0,0,1, 0.5f,0.5f }, { 4,0,0, 0,0,1, 0.5f,0.5f },
+                { 4,4,0, 0,0,1, 0.5f,0.5f }, { 0,4,0, 0,0,1, 0.5f,0.5f },
+                { 0,0,1, 0,0,1, 0.5f,0.5f }, { 4,0,1, 0,0,1, 0.5f,0.5f },
             };
             uint16_t idx[12] = { 0,1,2,  0,2,3,  0,1,4,  1,5,4 };
 
@@ -953,8 +955,14 @@ namespace
                         for (int x = 0; x < w; ++x)
                         {
                             const size_t i = ((size_t)y * w + x) * 3;
-                            if (px[i] == bg[0] && px[i+1] == bg[1] &&
-                                px[i+2] == bg[2]) continue;
+
+                            // A tolerance, not equality: compositing a
+                            // surface of negligible alpha shifts a pixel by
+                            // a single quantisation step, which is correct
+                            // behaviour and should not read as coverage.
+                            if (abs((int)px[i]   - (int)bg[0]) <= 2 &&
+                                abs((int)px[i+1] - (int)bg[1]) <= 2 &&
+                                abs((int)px[i+2] - (int)bg[2]) <= 2) continue;
                             ++differing;
                             if (y < h / 2) ++inTopHalf;
                         }
