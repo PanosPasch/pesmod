@@ -1113,6 +1113,11 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
         // most common one in the game. See DescribeDeclLayout.
         rec.uvOffset = geo->desc.uvOffset;
 
+        // Skinned meshes have their normals rewritten by the palette during
+        // the copy into the BLAS buffer, the same pass that moves the
+        // positions, so this offset is valid for a posed mesh too.
+        rec.normalOffset = geo->desc.normalOffset;
+
         rec.textureSlot  = textures ? textures->Slot(inst.baseTextureId)
                                     : kWhiteTextureSlot;
         rec.samplerIndex = SamplerIndexForAddress(inst.textureAddress);
@@ -1205,6 +1210,8 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
         memset(&rec, 0, sizeof(rec));
         rec.textureSlot  = kWhiteTextureSlot;
         rec.samplerIndex = 0;
+        rec.uvOffset     = SceneIPC::kNoVertexAttribute;
+        rec.normalOffset = SceneIPC::kNoVertexAttribute;
         rec.flags        = kRecordSpriteBatch;
         rec.baseColor[0] = rec.baseColor[1] = rec.baseColor[2] = rec.baseColor[3] = 1.0f;
 

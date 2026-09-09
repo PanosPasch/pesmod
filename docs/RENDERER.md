@@ -937,21 +937,19 @@ pixels back and Windows will not preview a PPM.
 Done: the transport, the device, scene reconstruction, acceleration
 structures, a ray tracing pipeline that traces every live frame, ordered
 transparency by depth peeling, per-sprite materials, ray masks that put the
-game's non-occluding draws and its own textured sky back in the picture, and
-a window of its own to put the result in. What remains is what turns a
+game's non-occluding draws and its own textured sky back in the picture,
+smooth normals where the game has them, and a window of its own to put the
+result in. What remains is what turns a
 correct image into a better one than the game's.
 
-1. **Normals.** Currently geometric, so everything is faceted. The 32-byte
-   layout carries real per-vertex normals; they have to be carried through
-   the scene stream and interpolated in the hit shader.
-2. **Overlap.** Every submit is followed by `vkQueueWaitIdle`, so structure
+1. **Overlap.** Every submit is followed by `vkQueueWaitIdle`, so structure
    builds and traces are fully serialised. Fences would let them overlap.
-3. **Shadow visibility inside the merged sprite batch.** The batch mixes
+2. **Shadow visibility inside the merged sprite batch.** The batch mixes
    occluding and non-occluding draws into one structure, so it carries one
    ray mask for all of them and its projected shadows cast shadows of their
    own. Splitting the merge in two would fix it.
-4. **Lighting beyond the game's rig.** The captured constants are the seed —
+3. **Lighting beyond the game's rig.** The captured constants are the seed —
    directional `c95`/`c94`, hemisphere `c93`/`c92`/`c91`, specular
    `c63`/`c70` — then physical stadium floodlights and a sky model.
-5. **Path tracing + denoise.** DLSS Ray Reconstruction is already present in
+4. **Path tracing + denoise.** DLSS Ray Reconstruction is already present in
    the game folder, making it the natural denoiser target.

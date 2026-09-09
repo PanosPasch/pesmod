@@ -216,7 +216,13 @@ namespace Host
             // is behind it is a property of the draw, and the hit shader
             // cannot ask the instance flags directly.
             uint32_t flags;
-            uint32_t _pad0, _pad1;
+
+            // Bytes to the float3 normal, or kNoVertexAttribute. Only the
+            // game's lit layouts have one; its 24-byte pre-lit layout
+            // carries a baked colour instead, and those surfaces stay
+            // faceted.
+            uint32_t normalOffset;
+            uint32_t _pad1;
         };
 
         static_assert(sizeof(InstanceRecord) == 64,
@@ -227,6 +233,8 @@ namespace Host
         static_assert(offsetof(InstanceRecord, samplerIndex) == 48,
                       "InstanceRecord must match shaders/common.glsl");
         static_assert(offsetof(InstanceRecord, flags)        == 52,
+                      "InstanceRecord must match shaders/common.glsl");
+        static_assert(offsetof(InstanceRecord, normalOffset) == 56,
                       "InstanceRecord must match shaders/common.glsl");
 
         // ── Materials for the merged sprite batch ────────────────────

@@ -528,10 +528,20 @@ namespace
         // A 4-triangle mesh: large enough to earn its own BLAS.
         {
             struct LitVertex { float px, py, pz, nx, ny, nz, u, v; };
+
+            // The normals differ at every vertex, and deliberately disagree
+            // with the geometry: the first quad lies in the z = 0 plane, so
+            // its triangles' own normals point along z while these point
+            // mostly along y. That is what makes the shading check below
+            // able to tell the two apart. All of them keep a positive y so
+            // the mesh still faces the light and stays lit.
             LitVertex verts[6] = {
-                {  0,  0,  0,  0,1,0, 0,0 }, {  1,  0,  0,  0,1,0, 1,0 },
-                {  1,  1,  0,  0,1,0, 1,1 }, {  0,  1,  0,  0,1,0, 0,1 },
-                {  0,  0,  1,  0,1,0, 0,0 }, {  1,  0,  1,  0,1,0, 1,0 },
+                {  0,  0,  0,  0.00f,  1.00f,  0.00f, 0,0 },
+                {  1,  0,  0, -0.71f, -0.71f,  0.00f, 1,0 },
+                {  1,  1,  0,  0.00f, -0.71f,  0.71f, 1,1 },
+                {  0,  1,  0, -0.71f,  0.00f,  0.71f, 0,1 },
+                {  0,  0,  1,  0.71f, -0.71f,  0.00f, 0,0 },
+                {  1,  0,  1,  0.00f,  0.71f,  0.71f, 1,0 },
             };
             uint16_t idx[12] = { 0,1,2,  0,2,3,  0,1,4,  1,5,4 };
 
@@ -1023,6 +1033,61 @@ namespace
                     check(red == 0,
                           "the fully transparent instance was skipped, not "
                           "drawn");
+
+                    // ── Are the mesh's own normals being used? ────────
+                    //
+                    // Inside one triangle the texture is a single colour and
+                    // the surface is flat, so the only thing that can vary
+                    // from pixel to pixel is the normal. A normal taken from
+                    // the triangle is constant across it and gives
+                    // byte-identical neighbours; the mesh's own normals
+                    // differ at every vertex and give a gradient.
+                    //
+                    // Only textured pixels are counted, because the merged
+                    // sprite batch has no normals by design and covers most
+                    // of the frame.
+                    size_t litPairs = 0, gradientPairs = 0;
+                    for (int y = 0; y < h; ++y)
+                        for (int x = 0; x + 1 < w; ++x)
+                        {
+                            const size_t i = ((size_t)y * w + x) * 3;
+                            const size_t j = i + 3;
+
+                            bool bothTextured = true;
+                            for (const size_t k : { i, j })
+                            {
+                                const double r = pow(px[k + 0] / 255.0, 2.2);
+                                const double b = pow(px[k + 2] / 255.0, 2.2);
+                                const double ratio = (r > 1e-6) ? b / r : 0.0;
+                                if (!(ratio > want * 0.85 && ratio < want * 1.15))
+                                    bothTextured = false;
+                            }
+                            if (!bothTextured) continue;
+                            ++litPairs;
+
+                            // A gradient, not an edge: a large jump is a
+                            // silhouette or a different instance, and only a
+                            // shading ramp is evidence about normals.
+                            int biggest = 0;
+                            for (int c = 0; c < 3; ++c)
+                                biggest = std::max(biggest,
+                                    abs((int)px[i + c] - (int)px[j + c]));
+                            if (biggest >= 1 && biggest <= 24) ++gradientPairs;
+                        }
+
+                    // Measured: 14% with the mesh's normals, and exactly
+                    // 0 of 2204 with them switched off - not "close to
+                    // zero", but every neighbouring pair byte-identical,
+                    // which is what a constant normal over a flat triangle
+                    // of one colour has to produce. The threshold sits well
+                    // clear of both.
+                    check(litPairs > 500 && gradientPairs * 20 > litPairs,
+                          "shading follows the mesh's own normals, not the "
+                          "triangle's");
+                    printf("  %zu of %zu neighbouring textured pixels are on "
+                           "a shading gradient (%.0f%%)\n",
+                           gradientPairs, litPairs,
+                           litPairs ? 100.0 * gradientPairs / litPairs : 0.0);
 
                     check(textured >= 100,
                           "the textured instance sampled its own texture, "

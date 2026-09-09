@@ -37,6 +37,16 @@ void main()
     // surface reports 1 so the ray generation stops there.
     float surfaceAlpha = 1.0;
 
+    // attribs holds the last two barycentrics; the first is what remains.
+    const vec3 bary = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
+
+    // Resolved once, because the albedo and the normal both need it and
+    // they must not be allowed to disagree about which triangle was hit.
+    const bool haveVertices = (rec.vertexAddress != 0ul) &&
+                              ((rec.flags & kRecordSpriteBatch) == 0u);
+    const uvec3 tri = haveVertices ? HitTriangle(rec, gl_PrimitiveID)
+                                   : uvec3(0u);
+
     vec3 albedo = rec.baseColor.rgb;
     if ((rec.flags & kRecordSpriteBatch) != 0u)
     {
@@ -52,28 +62,9 @@ void main()
         if ((spr.flags & kRecordBlended) != 0u)
             surfaceAlpha = sampled.a * spr.baseColor.a;
     }
-    else if (rec.vertexAddress != 0ul && rec.uvOffset != kNoVertexAttribute)
+    else if (haveVertices && rec.uvOffset != kNoVertexAttribute)
     {
         FloatData verts = FloatData(rec.vertexAddress);
-
-        // The three corner indices of the triangle that was hit.
-        uvec3 tri;
-        if (rec.indexStride != 0u)
-        {
-            WordData idx = WordData(rec.indexAddress);
-            const uint base = gl_PrimitiveID * 3u;
-            tri = uvec3(IndexAt(idx, rec.indexStride, base),
-                        IndexAt(idx, rec.indexStride, base + 1u),
-                        IndexAt(idx, rec.indexStride, base + 2u));
-        }
-        else
-        {
-            const uint base = gl_PrimitiveID * 3u;
-            tri = uvec3(base, base + 1u, base + 2u);
-        }
-
-        // attribs holds the last two barycentrics; the first is what remains.
-        const vec3 bary = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
 
         const vec2 uv = bary.x * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.x)
                       + bary.y * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.y)
@@ -102,15 +93,19 @@ void main()
     }
 
     // ── Normals ──────────────────────────────────────────────────────────
-    // The game supplies none for its 24-byte pre-lit vertex layout, so a
-    // geometric normal is derived from the triangle itself. Position fetch
-    // hands us the vertices directly, which avoids binding every mesh's
-    // vertex and index buffers into the hit shader just to read three
-    // positions.
     //
-    // This gives faceted shading. Smooth normals would need the game's own,
-    // which exist only for the 32-byte lit layout — a later refinement, and
-    // one that has to be fed through the scene stream first.
+    // The game's lit layouts carry a per-vertex normal; its 24-byte pre-lit
+    // layout carries a baked colour instead and has none. So a surface uses
+    // its own normals when it has them, and a geometric one when it does
+    // not - which is 96% of the geometries in a recorded stream by count,
+    // but the ones that matter most, the players, are all in the 4% that do.
+    //
+    // A skinned mesh's normals are rewritten by the palette in the same pass
+    // that moves its positions, so this reads a posed normal, not a rest one.
+    //
+    // Position fetch hands the triangle's vertices over directly, which is
+    // what makes the geometric fallback free: no vertex buffer needs binding
+    // to read three positions.
     const vec3 p0 = gl_HitTriangleVertexPositionsEXT[0];
     const vec3 p1 = gl_HitTriangleVertexPositionsEXT[1];
     const vec3 p2 = gl_HitTriangleVertexPositionsEXT[2];
@@ -123,9 +118,25 @@ void main()
     // case; it accounted for the dark quads on players' chests.
     const vec3  crossed = cross(p1 - p0, p2 - p0);
     const float area2   = length(crossed);
-    const vec3  objectNormal = (area2 > 1e-20)
-                             ? crossed / area2
-                             : -normalize(gl_WorldRayDirectionEXT);
+    vec3 objectNormal = (area2 > 1e-20)
+                      ? crossed / area2
+                      : -normalize(gl_WorldRayDirectionEXT);
+
+    if (haveVertices && rec.normalOffset != kNoVertexAttribute)
+    {
+        FloatData verts = FloatData(rec.vertexAddress);
+        const vec3 interpolated =
+              bary.x * VertexNormal(verts, rec.vertexStride, rec.normalOffset, tri.x)
+            + bary.y * VertexNormal(verts, rec.vertexStride, rec.normalOffset, tri.y)
+            + bary.z * VertexNormal(verts, rec.vertexStride, rec.normalOffset, tri.z);
+
+        // Opposed influences in the palette can cancel a skinned normal to
+        // nothing, and normalizing that is a NaN that survives to the end as
+        // a black patch. The geometric normal is already computed and is the
+        // right thing to keep when that happens.
+        const float len = length(interpolated);
+        if (len > 1e-6) objectNormal = interpolated / len;
+    }
 
     // Object-to-world for normals is the inverse transpose, but the game's
     // transforms are rigid plus uniform scale, so the 3x3 suffices once

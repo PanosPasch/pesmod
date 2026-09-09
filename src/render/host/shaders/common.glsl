@@ -49,7 +49,8 @@ struct InstanceRecord
     vec4     baseColor;
     uint     samplerIndex;   // addressing belongs to the draw, not the image
     uint     flags;          // kRecordBlended
-    uint     _pad0, _pad1;
+    uint     normalOffset;   // bytes to the float3 normal, or kNoVertexAttribute
+    uint     _pad1;
 };
 
 // ── Ray masks ────────────────────────────────────────────────────────────
@@ -200,6 +201,25 @@ vec2 VertexUv(FloatData verts, uint stride, uint uvOffset, uint index)
     // float index is exact.
     const uint base = (index * stride + uvOffset) >> 2u;
     return vec2(verts.v[base], verts.v[base + 1u]);
+}
+
+vec3 VertexNormal(FloatData verts, uint stride, uint normalOffset, uint index)
+{
+    const uint base = (index * stride + normalOffset) >> 2u;
+    return vec3(verts.v[base], verts.v[base + 1u], verts.v[base + 2u]);
+}
+
+// The three corner indices of the triangle that was hit. Non-indexed
+// geometry numbers its vertices straight through.
+uvec3 HitTriangle(InstanceRecord rec, uint primitiveID)
+{
+    const uint base = primitiveID * 3u;
+    if (rec.indexStride == 0u) return uvec3(base, base + 1u, base + 2u);
+
+    WordData idx = WordData(rec.indexAddress);
+    return uvec3(IndexAt(idx, rec.indexStride, base),
+                 IndexAt(idx, rec.indexStride, base + 1u),
+                 IndexAt(idx, rec.indexStride, base + 2u));
 }
 
 // The interpolated UV at a triangle hit. Shared by the closest-hit and
