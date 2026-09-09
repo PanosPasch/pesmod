@@ -34,7 +34,9 @@ void main()
     // The merged sprite batch has no vertex data of its own — its triangles
     // were baked into world space from many draws — so there is no UV to
     // test and it stays opaque.
-    if (rec.vertexAddress == 0ul) return;
+    // No vertex data, or no texture coordinates: nothing to test against,
+    // so the surface stays opaque.
+    if (rec.vertexAddress == 0ul || rec.uvOffset == kNoVertexAttribute) return;
 
     const vec2 uv = HitUv(rec, gl_PrimitiveID, attribs);
 

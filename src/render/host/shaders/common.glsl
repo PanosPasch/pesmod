@@ -42,7 +42,7 @@ struct InstanceRecord
     uint64_t vertexAddress;
     uint64_t indexAddress;
     uint     vertexStride;
-    uint     uvOffset;      // bytes into a vertex, to its float2 UV
+    uint     uvOffset;      // bytes to the float2 UV, or 0xFFFFFFFF
     uint     indexStride;   // 2 or 4; 0 means non-indexed
     uint     textureSlot;
     vec4     baseColor;
@@ -121,6 +121,8 @@ vec2 HitUv(InstanceRecord rec, uint primitiveID, vec2 bary2)
 // against the game's own pitch layers: of the seven coplanar draws covering
 // the pitch, the two that are pure noise in a ray tracer have maximum alphas
 // of 0.14 and 0.25, while the grass base is 1.0 everywhere.
+const uint kNoVertexAttribute = 0xFFFFFFFFu;
+
 const float kAlphaCutoff = 0.5;
 
 // Unprojects a point on the near or far plane back into world space.

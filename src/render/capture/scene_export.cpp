@@ -90,6 +90,12 @@ namespace
     uint64_t g_indicesOutOfSlice = 0;
     bool     g_warnedOutOfSlice  = false;
 
+    // Why draws were dropped. drawsSkipped alone hid the fact that the most
+    // common vertex layout in the game was being rejected outright, so the
+    // reasons are counted separately now.
+    uint64_t g_skippedLayout        = 0;   // no position at 0, or too small
+    uint64_t g_skippedNoDeclaration = 0;   // shader created before the hook
+
     // ── Geometry id churn diagnostic ─────────────────────────────────────
     // The host's geometry cache was observed growing without bound (~8-15 new
     // ids per frame forever) while the instance count stayed flat, which means
@@ -284,16 +290,118 @@ namespace
         }
     }
 
-    // ── Vertex layout classification ─────────────────────────────────────
-    // From docs/RENDERER.md §4.2: the game's 3D geometry is either 24 bytes
-    // (position / D3DCOLOR / uv, pre-lit) or 32 bytes (position / normal /
-    // uv, dynamically lit). Anything else is not something the ray tracer
-    // knows how to interpret, and is reported rather than guessed at.
-    uint32_t ClassifyVertexKind(uint32_t stride)
+    // ── Vertex layout ────────────────────────────────────────────────────
+    //
+    // Where each attribute sits inside a vertex, read from the game's own
+    // declaration rather than inferred from the stride.
+    //
+    // This used to be a two-line guess: stride 24 meant pos/colour/uv, stride
+    // 32 meant pos/normal/uv, anything else was rejected. The game has at
+    // least five layouts — 24, 32, 36 and 40 bytes, plus multi-stream
+    // variants — and the 40-byte one is the most common of all, 5,944 of
+    // 11,207 world draws across every capture. Rejecting it dropped every
+    // player body while their heads and hands, which use other layouts, kept
+    // rendering.
+    //
+    // Position is required at offset 0, because that is what an acceleration
+    // structure build reads and it is true of every layout the game uses.
+    // Everything after it moves.
+    struct VertexLayout
     {
-        if (stride == 24) return kVertexPreLit;
-        if (stride == 32) return kVertexLit;
-        return kVertexUnknown;
+        uint32_t kind;           // VertexKind
+        uint32_t uvOffset;       // kNoVertexAttribute when absent
+        uint32_t normalOffset;
+        uint32_t colorOffset;
+        bool     usable;         // position at offset 0, stride large enough
+    };
+
+    VertexLayout DescribeFvfLayout(uint32_t fvf, uint32_t stride)
+    {
+        VertexLayout out;
+        out.kind         = kVertexPreLit;
+        out.uvOffset     = kNoVertexAttribute;
+        out.normalOffset = kNoVertexAttribute;
+        out.colorOffset  = kNoVertexAttribute;
+        out.usable       = false;
+
+        D3D8Util::FvfLayout fl;
+        if (!D3D8Util::FvfDecode(fvf, fl)) return out;
+        if (fl.posOffset != 0 || fl.positionIsTransformed) return out;
+
+        if (fl.normalOffset >= 0)
+        {
+            out.normalOffset = (uint32_t)fl.normalOffset;
+            out.kind         = kVertexLit;
+        }
+        if (fl.diffuseOffset >= 0) out.colorOffset = (uint32_t)fl.diffuseOffset;
+
+        // Only a 2-float set is a texture coordinate this renderer can use.
+        for (int i = 0; i < fl.texCoordCount; ++i)
+        {
+            if (fl.texCoordFloats[i] == 2 && fl.texCoordOffset[i] >= 0)
+            {
+                out.uvOffset = (uint32_t)fl.texCoordOffset[i];
+                break;
+            }
+        }
+
+        out.usable = (stride >= 12);
+        return out;
+    }
+
+    // A declaration feeding a real vertex shader binds plain input registers
+    // with no semantics, so the attributes have to be identified structurally:
+    // the float3 at offset 0 is the position, a later float3 is a normal, and
+    // a float2 is a texture coordinate. That holds for every layout this game
+    // uses, and the alternative — trusting D3DVSDE_* register numbers — is
+    // meaningless without a fixed-function pipeline behind them.
+    VertexLayout DescribeDeclLayout(const D3D8Util::VertexDeclLayout& decl,
+                                    uint32_t stride)
+    {
+        VertexLayout out;
+        out.kind         = kVertexPreLit;
+        out.uvOffset     = kNoVertexAttribute;
+        out.normalOffset = kNoVertexAttribute;
+        out.colorOffset  = kNoVertexAttribute;
+        out.usable       = false;
+
+        if (!decl.valid) return out;
+
+        bool havePosition = false;
+        for (uint32_t i = 0; i < decl.elementCount; ++i)
+        {
+            const D3D8Util::VertexDeclElement& e = decl.elements[i];
+
+            // Stream 0 only. The multi-stream layouts put extra float3 data
+            // in stream 1, which is not a normal for stream 0's vertices and
+            // would be read at the wrong stride if treated as one.
+            if (e.stream != 0) continue;
+
+            if (e.type == D3D8Util::kVsdtFloat3 && e.offset == 0)
+            {
+                havePosition = true;
+                continue;
+            }
+            if (e.type == D3D8Util::kVsdtFloat3 &&
+                out.normalOffset == kNoVertexAttribute)
+            {
+                out.normalOffset = e.offset;
+                out.kind         = kVertexLit;
+            }
+            else if (e.type == D3D8Util::kVsdtFloat2 &&
+                     out.uvOffset == kNoVertexAttribute)
+            {
+                out.uvOffset = e.offset;
+            }
+            else if (e.type == D3D8Util::kVsdtD3DColor &&
+                     out.colorOffset == kNoVertexAttribute)
+            {
+                out.colorOffset = e.offset;
+            }
+        }
+
+        out.usable = havePosition && stride >= 12;
+        return out;
     }
 
     // The interpretation of c58..c61 lives in scene_conventions.h, shared
@@ -678,6 +786,15 @@ void EndFrame()
             (unsigned long long)g_insaneClipTransforms);
     }
 
+    if (g_stats.framesSent && (g_stats.framesSent % kChurnReportInterval) == 0 &&
+        (g_skippedLayout || g_skippedNoDeclaration))
+    {
+        Logger::Log("[Export] draws skipped: %llu unusable vertex layout, "
+            "%llu with a declaration created before the hook",
+            (unsigned long long)g_skippedLayout,
+            (unsigned long long)g_skippedNoDeclaration);
+    }
+
     if (g_indicesOutOfSlice && !g_warnedOutOfSlice)
     {
         g_warnedOutOfSlice = true;
@@ -729,8 +846,24 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
     if (info.userPointer) { ++g_stats.drawsSkipped; return; }
 
     const uint32_t stride = state.stream[0].stride;
-    const uint32_t kind   = ClassifyVertexKind(stride);
-    if (kind == kVertexUnknown) { ++g_stats.drawsSkipped; return; }
+
+    // Ask the game what its vertices look like rather than guessing from the
+    // stride; see DescribeDeclLayout for what that guess cost.
+    VertexLayout layout;
+    if (state.VertexShaderIsFvf())
+    {
+        layout = DescribeFvfLayout(state.vertexShader, stride);
+    }
+    else
+    {
+        const Registry::VertexShaderInfo* vs =
+            Registry::FindVertexShader(state.vertexShader);
+        if (!vs) { ++g_stats.drawsSkipped; ++g_skippedNoDeclaration; return; }
+        layout = DescribeDeclLayout(vs->layout, stride);
+    }
+
+    if (!layout.usable) { ++g_stats.drawsSkipped; ++g_skippedLayout; return; }
+    const uint32_t kind = layout.kind;
 
     ResourceInfo* vbInfo = Registry::Find(state.stream[0].buffer);
     if (!vbInfo) { ++g_stats.drawsSkipped; return; }
@@ -822,6 +955,9 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
         gd.indexCount   = indexCount;
         gd.indexStride  = indexStride;
         gd.contentHash  = contentHash;
+        gd.uvOffset     = layout.uvOffset;
+        gd.normalOffset = layout.normalOffset;
+        gd.colorOffset  = layout.colorOffset;
 
         // Vertices and indices go as one payload, in that order, matching
         // how GeometryDesc documents the layout.

@@ -33,7 +33,7 @@ void main()
     const InstanceRecord rec = instances[gl_InstanceCustomIndexEXT];
 
     vec3 albedo = rec.baseColor.rgb;
-    if (rec.vertexAddress != 0ul)
+    if (rec.vertexAddress != 0ul && rec.uvOffset != kNoVertexAttribute)
     {
         FloatData verts = FloatData(rec.vertexAddress);
 

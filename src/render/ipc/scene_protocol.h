@@ -44,7 +44,7 @@ namespace SceneIPC
 {
     // 'PSCN' — bumped whenever any structure below changes shape.
     static const uint32_t kSceneMagic   = 0x4E435350u;
-    static const uint32_t kSceneVersion = 2u;
+    static const uint32_t kSceneVersion = 3u;
 
     // Default shared mapping size. This is address space in the *32-bit*
     // process, which only has ~2 GB of it, so the default is deliberately
@@ -74,15 +74,24 @@ namespace SceneIPC
     };
 
     // ── Geometry ─────────────────────────────────────────────────────────
-    // The two vertex layouts the game actually uses, from docs/RENDERER.md.
-    // Both are 24 or 32 bytes with position first, which is all the BLAS
-    // builder needs; the rest is material input.
+    // Whether the game supplied a normal, which decides whether the renderer
+    // can shade the surface or has to derive a geometric normal.
+    //
+    // This used to be inferred from the vertex stride, on the belief that the
+    // game had two layouts of 24 and 32 bytes. It has at least five - 24, 32,
+    // 36 and 40 bytes plus multi-stream variants - and the 40-byte one is the
+    // most common of all, 5,944 of 11,207 world draws across every capture.
+    // Inferring anything from the stride dropped it entirely, which is why
+    // players appeared as a floating head and a hand.
     enum VertexKind : uint32_t
     {
         kVertexUnknown  = 0,
-        kVertexPreLit   = 1,   // 24B: float3 pos, D3DCOLOR diffuse, float2 uv
-        kVertexLit      = 2    // 32B: float3 pos, float3 normal, float2 uv
+        kVertexPreLit   = 1,   // no normal; a baked vertex colour instead
+        kVertexLit      = 2    // carries a per-vertex normal
     };
+
+    // Offsets are byte positions within a vertex, or this when absent.
+    static const uint32_t kNoVertexAttribute = 0xFFFFFFFFu;
 
     struct GeometryDesc
     {
@@ -93,6 +102,15 @@ namespace SceneIPC
         uint32_t indexCount;      // 0 = non-indexed
         uint32_t indexStride;     // 2 (the game is 16-bit) or 4
         uint32_t contentHash;     // cheap change detector for reused ids
+
+        // Where the attributes actually are, decoded from the game's own
+        // vertex declaration rather than guessed from the stride. Position is
+        // always at offset 0 - that is what the acceleration structure build
+        // requires - but everything after it moves between layouts.
+        uint32_t uvOffset;        // float2, or kNoVertexAttribute
+        uint32_t normalOffset;    // float3, or kNoVertexAttribute
+        uint32_t colorOffset;     // D3DCOLOR, or kNoVertexAttribute
+        uint32_t _pad0;
         // Payload follows: vertexCount*vertexStride bytes, then
         // indexCount*indexStride bytes, each padded to 8 bytes.
     };
@@ -237,7 +255,7 @@ namespace SceneIPC
                       #type " changed size - 32/64-bit ABI would diverge")
 
     SCENEIPC_ASSERT_LAYOUT(MessageHeader,  8);
-    SCENEIPC_ASSERT_LAYOUT(GeometryDesc,  32);
+    SCENEIPC_ASSERT_LAYOUT(GeometryDesc,  48);
     SCENEIPC_ASSERT_LAYOUT(TextureDesc,   32);
     SCENEIPC_ASSERT_LAYOUT(Matrix4x4,     64);
     SCENEIPC_ASSERT_LAYOUT(FrameBegin,   160);
@@ -256,6 +274,9 @@ namespace SceneIPC
     // Spot-check the offsets that a bitness mistake would most plausibly
     // shift — the ones following 64-bit members.
     static_assert(offsetof(GeometryDesc, vertexKind)   == 8,  "GeometryDesc layout");
+    static_assert(offsetof(GeometryDesc, uvOffset)     == 32, "GeometryDesc layout");
+    static_assert(offsetof(GeometryDesc, normalOffset) == 36, "GeometryDesc layout");
+    static_assert(offsetof(GeometryDesc, colorOffset)  == 40, "GeometryDesc layout");
     static_assert(offsetof(TextureDesc,  format)       == 8,  "TextureDesc layout");
     static_assert(offsetof(FrameBegin,   view)         == 16, "FrameBegin layout");
     static_assert(offsetof(FrameBegin,   projection)   == 80, "FrameBegin layout");

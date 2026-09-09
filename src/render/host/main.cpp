@@ -191,6 +191,10 @@ namespace
             gd.vertexCount  = 6;
             gd.indexCount   = 12;
             gd.indexStride  = 2;
+            // The layout the producer would have decoded from the game.
+            gd.normalOffset = 12;
+            gd.uvOffset     = 24;
+            gd.colorOffset  = SceneIPC::kNoVertexAttribute;
             gd.contentHash  = 0xABCD1234u;
 
             std::vector<uint8_t> payload(sizeof(verts) + sizeof(idx));
@@ -217,6 +221,10 @@ namespace
             gd.vertexCount  = 4;
             gd.indexCount   = 6;
             gd.indexStride  = 2;
+            // The layout the producer would have decoded from the game.
+            gd.normalOffset = 12;
+            gd.uvOffset     = 24;
+            gd.colorOffset  = SceneIPC::kNoVertexAttribute;
             gd.contentHash  = 0x55AA55AAu;
 
             std::vector<uint8_t> payload(sizeof(verts) + sizeof(idx));
@@ -245,6 +253,10 @@ namespace
             gd.vertexCount  = 6;
             gd.indexCount   = 12;
             gd.indexStride  = 2;
+            // The layout the producer would have decoded from the game.
+            gd.normalOffset = 12;
+            gd.uvOffset     = 24;
+            gd.colorOffset  = SceneIPC::kNoVertexAttribute;
             gd.contentHash  = 0x0F0F0F0Fu;
 
             std::vector<uint8_t> payload(sizeof(verts) + sizeof(idx));

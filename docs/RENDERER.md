@@ -345,12 +345,34 @@ separates them with three orders of magnitude to spare, and
 *one* `c58` block, so it is the shared view-projection and the vertices are
 already in world space. Per-object placement is the exception, not the rule.
 
-**Two geometry classes**, distinguished by their vertex layout:
+**At least five vertex layouts**, not two. An early capture showed only 24-
+and 32-byte vertices and the renderer was built on that; counted across every
+capture taken since, the picture is quite different:
 
-| Layout | `v1` | Shader | Meaning |
-| ------ | ---- | ------ | ------- |
-| 24 B `v0:float3 v1:d3dcolor v2:float2` | vertex colour | `vs_0003` | pre-lit geometry |
-| 32 B `v0:float3 v1:float3 v2:float2` | **normal** | `vs_0005`, `vs_0007` | dynamically lit geometry |
+| Stride | Declaration | Draws | Has normal |
+| -----: | ----------- | ----: | ---------- |
+| 40 B | `float3, d3dcolor, d3dcolor, float3, float2` | **5,944** | yes (offset 20) |
+| 32 B | `float3, float3, float2` (± a stream-1 `float3`) | 3,012 | yes (offset 12) |
+| 24 B | `float3, d3dcolor, float2` | 1,213 | no |
+| 36 B | `float3, d3dcolor, float3, float2` | 616 | yes (offset 16) |
+| 0 B | (no declaration bound) | 422 | — |
+
+The 40-byte layout is the most common in the game, and rejecting anything
+that was not 24 or 32 bytes dropped it entirely. The visible result was
+players rendering as a floating head and a hand: heads and hands use other
+layouts.
+
+Position is at offset 0 in every one of them, which is what an acceleration
+structure build requires. Nothing else is at a predictable offset, so
+`GeometryDesc` now carries `uvOffset`, `normalOffset` and `colorOffset`
+decoded from the game's own declaration rather than inferred from the stride.
+
+A declaration feeding a real vertex shader binds plain input registers with
+no semantics, so the attributes are identified structurally: the `float3` at
+offset 0 is the position, a later `float3` is a normal, a `float2` is a
+texture coordinate. Stream 0 only — the multi-stream variants put extra
+`float3` data in stream 1, which is not a normal for stream 0's vertices and
+would be read at the wrong stride if treated as one.
 
 For the pre-lit class, shading really is just `mul oD0, v1, c72` — vertex
 colour times a global tint. For the lit class, `vs_0007` computes real

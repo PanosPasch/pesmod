@@ -747,10 +747,11 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
         rec.vertexStride  = geo->desc.vertexStride;
         rec.indexStride   = geo->desc.indexCount ? geo->desc.indexStride : 0;
 
-        // Where the float2 UV sits inside a vertex. Both of the game's
-        // layouts end with it; only what precedes it differs — a packed
-        // colour in the pre-lit layout, a normal in the lit one.
-        rec.uvOffset = (geo->desc.vertexKind == SceneIPC::kVertexLit) ? 24u : 16u;
+        // Straight from the game's own vertex declaration. This was once
+        // derived from vertexKind, which only worked because the producer
+        // rejected every layout that did not match the guess - including the
+        // most common one in the game. See DescribeDeclLayout.
+        rec.uvOffset = geo->desc.uvOffset;
 
         rec.textureSlot = textures ? textures->Slot(inst.baseTextureId)
                                    : kWhiteTextureSlot;
