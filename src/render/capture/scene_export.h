@@ -79,6 +79,20 @@ namespace Capture
             uint64_t texturesCopiedBack;     // unlockable, read via CopyRects
             uint64_t texturesUnreadable;     // not lockable and not copyable
             uint64_t texturesRetried;        // a later attempt after a failure
+
+            // Textures re-sent because the content behind the pointer
+            // changed. Two things cause it: the game updating a texture in
+            // place, and - the reason this check exists - the game releasing
+            // a texture and Direct3D handing the same address to a new one.
+            //
+            // Nothing hooks Release, so the resource registry cannot know a
+            // texture died; it finds the stale pointer and reuses its id. If
+            // "already sent" is then taken at face value, the new texture's
+            // pixels are never transmitted and every draw using it samples
+            // the dead one. That is a pitch drawn with a kit atlas and a goal
+            // net drawn with crowd, and it only appears once a session has
+            // run long enough for an address to be recycled.
+            uint64_t texturesContentChanged;
         };
         const ExportStats& Stats();
     }

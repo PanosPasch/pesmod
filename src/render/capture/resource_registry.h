@@ -85,6 +85,12 @@ namespace Capture
         // Called from Release paths so ids are not reused for live objects.
         void Remove(const void* object);
 
+        // How many times a Create returned an address already on record,
+        // meaning the resource that held it was released and a new one
+        // took its place. Each of those is a resource that would have
+        // inherited a dead identity before.
+        uint32_t RecreatedAtSameAddress();
+
         // Iteration for the report writer.
         uint32_t Count();
         const ResourceInfo* At(uint32_t index);

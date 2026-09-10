@@ -49,6 +49,15 @@ namespace
         uint32_t state;
         uint32_t attempts;
         uint64_t lastAttemptFrame;
+
+        // What was actually sent, so that "already sent" can be checked
+        // rather than assumed. Geometry has always worked this way - it
+        // re-sends whenever its content hash changes - and textures were the
+        // one resource that never looked again.
+        uint32_t fingerprint;
+        uint32_t width, height;
+        uint32_t format;
+        uint64_t lastCheckFrame;
     };
     std::unordered_map<uint64_t, SentTexture> g_sentTextures;
 
@@ -58,6 +67,31 @@ namespace
     // over several seconds is not going to start working.
     const uint64_t kTextureRetryFrames   = 30;
     const uint32_t kTextureRetryAttempts = 12;
+
+    // How often a texture already sent is read back and checked against what
+    // was sent. Staggered by id, so with a few hundred textures resident this
+    // is a couple of surface reads a frame rather than a burst.
+    const uint64_t kTextureRecheckFrames = 240;
+
+    // A hash of what was sent. Sparse on purpose: enough samples to separate
+    // two different textures of the same size, few enough to be free next to
+    // the surface read that produced the bytes.
+    uint32_t FingerprintTexture(uint32_t width, uint32_t height, uint32_t format,
+                                const std::vector<uint8_t>& pixels)
+    {
+        uint32_t h = 2166136261u;
+        auto mix = [&h](uint32_t v)
+        {
+            h ^= v;
+            h *= 16777619u;
+        };
+        mix(width); mix(height); mix(format); mix((uint32_t)pixels.size());
+
+        const size_t n = pixels.size();
+        const size_t step = (n > 4096) ? (n / 1024) : 1;
+        for (size_t i = 0; i < n; i += step) mix(pixels[i]);
+        return h;
+    }
 
     // Last frame each geometry id was actually drawn.
     //
@@ -825,8 +859,54 @@ namespace
         outId = info->id;
 
         SentTexture& record = g_sentTextures[info->id];
-        if (record.state == kTexStateSent || record.state == kTexStateHopeless)
-            return;
+        if (record.state == kTexStateHopeless) return;
+
+        if (record.state == kTexStateSent)
+        {
+            // Is the texture behind this pointer still the one that was sent?
+            //
+            // The registry keys on the pointer and nothing hooks Release, so
+            // a released texture whose address Direct3D recycles arrives here
+            // wearing the dead one's id. Taking "sent" at face value is what
+            // painted the pitch with a kit atlas.
+            IDirect3DTexture8* live = (IDirect3DTexture8*)texture;
+            D3DSURFACE_DESC now;
+            if (FAILED(live->GetLevelDesc(0, &now))) return;
+
+            // Size or format differing settles it without reading anything.
+            const bool shapeChanged = now.Width  != record.width  ||
+                                      now.Height != record.height ||
+                                      (uint32_t)now.Format != record.format;
+
+            if (!shapeChanged)
+            {
+                // Otherwise the content has to be looked at, which costs a
+                // surface read - so only every so often, and staggered by id
+                // so the cost is spread rather than spiking.
+                if (g_stats.framesSent - record.lastCheckFrame <
+                    kTextureRecheckFrames)
+                    return;
+                record.lastCheckFrame = g_stats.framesSent;
+
+                const uint32_t fmt = TranslateTextureFormat(info->format);
+                std::vector<uint8_t> current;
+                bool viaCopy = false;
+                if (!ReadTextureLevel0(device, live, fmt, now, current, viaCopy))
+                    return;   // unreadable this time; keep what was sent
+
+                if (FingerprintTexture(now.Width, now.Height,
+                                       (uint32_t)now.Format, current) ==
+                    record.fingerprint)
+                    return;
+            }
+
+            // Changed. Fall through and send it again under the same id: from
+            // the game's point of view there is one texture at this pointer,
+            // and the host replaces the pixels it holds for that id.
+            ++g_stats.texturesContentChanged;
+            record.state    = 0;
+            record.attempts = 0;
+        }
 
         if (record.attempts)
         {
@@ -889,7 +969,14 @@ namespace
         if (g_ring.TryWrite(kMsgTexture, &td, sizeof(td), pixels.data(),
                             td.payloadBytes, false))
         {
-            record.state = kTexStateSent;
+            record.state       = kTexStateSent;
+            record.width       = level0.Width;
+            record.height      = level0.Height;
+            record.format      = (uint32_t)level0.Format;
+            record.fingerprint = FingerprintTexture(level0.Width, level0.Height,
+                                                    (uint32_t)level0.Format,
+                                                    pixels);
+            record.lastCheckFrame = g_stats.framesSent;
             ++g_stats.textureUploads;
             g_stats.textureBytes += td.payloadBytes;
         }
@@ -936,7 +1023,9 @@ void Shutdown()
                 "%llu geometry uploads (%.1f MB), %llu textures (%.1f MB), "
                 "%llu draws skipped, %llu write failures. Textures not sent: "
                 "%llu unknown format, %llu unreadable (%llu needed a copy, "
-                "%llu retries).",
+                "%llu retries). Textures re-sent after their content changed "
+                "under the same pointer: %llu. Resources recreated at an "
+                "address already on record: %u.",
                 (unsigned long long)g_stats.framesSent,
                 (unsigned long long)g_stats.instancesSent,
                 (unsigned long long)g_stats.geometryUploads,
@@ -948,7 +1037,9 @@ void Shutdown()
                 (unsigned long long)g_stats.texturesUnknownFormat,
                 (unsigned long long)g_stats.texturesUnreadable,
                 (unsigned long long)g_stats.texturesCopiedBack,
-                (unsigned long long)g_stats.texturesRetried);
+                (unsigned long long)g_stats.texturesRetried,
+                (unsigned long long)g_stats.texturesContentChanged,
+                Registry::RecreatedAtSameAddress());
     g_ring.Close();
     g_active = false;
 }

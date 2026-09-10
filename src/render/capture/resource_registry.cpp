@@ -31,19 +31,36 @@ namespace
         return count;
     }
 
+    // How many times an address came back carrying a different resource.
+    uint32_t g_recreatedAtSameAddress = 0;
+
     Capture::ResourceInfo& Append(Capture::ResourceKind kind, void* object)
     {
-        // A pointer can legitimately be reused after the previous owner was
-        // released, so an existing entry is overwritten rather than doubled up.
+        // Only the Create paths reach here, so an address that is already
+        // known means one thing: the resource that had it was released and
+        // Direct3D handed the address to a new one. That is a different
+        // resource and it must not inherit the dead one's identity.
+        //
+        // It used to. The id was kept "so an existing entry is not doubled
+        // up", which quietly made two resources share one name - and since
+        // the consumer caches by that name, the new texture's pixels were
+        // never sent and every draw using it sampled the dead one. On screen:
+        // a pitch drawn with a kit atlas, a goal net drawn with crowd, and
+        // only after a session had run long enough for an address to be
+        // recycled.
+        //
+        // Nothing hooks Release - there is no Release proxy anywhere - so
+        // this is the only moment the death of a resource is observable at
+        // all. Recording it here is what makes the identity honest.
         auto it = g_byPointer.find(object);
         if (it != g_byPointer.end())
         {
             Capture::ResourceInfo& existing = g_resources[it->second];
-            const uint32_t reusedId = existing.id;
             existing = Capture::ResourceInfo();
-            existing.id     = reusedId;
+            existing.id     = g_nextId++;
             existing.kind   = kind;
             existing.object = object;
+            ++g_recreatedAtSameAddress;
             return existing;
         }
 
@@ -145,6 +162,11 @@ void Remove(const void* object)
 uint32_t Count()
 {
     return (uint32_t)g_resources.size();
+}
+
+uint32_t RecreatedAtSameAddress()
+{
+    return g_recreatedAtSameAddress;
 }
 
 const ResourceInfo* At(uint32_t index)
