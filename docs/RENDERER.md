@@ -530,7 +530,74 @@ upload exactly once, and only a draw whose weights genuinely animate costs
 anything. Weight zero skips the buffer read entirely, so the common case is
 one extra stream read per morph draw, not six.
 
-### 4.5 Menu rendering, for contrast
+### 4.5 Where the morph blend belongs, and what it cost to find out
+
+The weights looked static: measured over the capture set, 110 morph draws in
+a match frame share **two** weight sets between them, unchanged across frames
+a hundred apart. On that evidence the blend went in the producer, which is
+the simplest thing that can work — the positions upload once and are cached.
+
+Those captures are menu and replay frames. In play the weights animate, which
+is precisely why faces started working, and a blended position rewrites the
+content hash every time one moves. Classified over 2.5 GB of a session
+recording:
+
+| Morph targets | New ids | Re-uploads | New MB | Re-upload MB |
+| ------------: | ------: | ---------: | -----: | -----------: |
+| 0 | 70,149 | 3,818 | 27.5 | 9.5 |
+| 1–8 | 4,154 | 117,442 | 14.4 | 675.9 |
+| **total** | **74,303** | **121,260** | **45.8** | **685.4** |
+
+96.9% of re-uploads are morphed meshes, and geometry traffic went from 5 KB
+per frame to 94 KB.
+
+**A full ring does not drop a message, it drops the draw.** A failed geometry
+write returns before the instance is written, because emitting an instance
+whose geometry the host does not have renders garbage. So back-pressure on
+the resource path removes world draws entirely: that session logged
+1,791,819 write failures over 15,115 frames — **118 draws per frame that
+never left the game**. On screen that is pitch markings and patterns
+appearing and disappearing, which is exactly what it looked like.
+
+So the deltas ride with the geometry and the weights with the instance, and
+the blend happens in the copy into the BLAS buffer — the same pass and the
+same argument as skinning (§6.6). A build morph never moves, so its structure
+is built once; only an expression pays for a rebuild, and `AccelStats`
+reports the split.
+
+The general lesson is narrower than "measure": the capture set is menus and
+replays, and a quantity that is static there can animate in play. Anything
+measured off it that decides how much data crosses the boundary needs
+checking against a match.
+
+### 4.6 Which lighting rig is the frame's?
+
+The rig is read from vertex shader constants, and those hold whatever the
+last draw left there. That is not one value per frame:
+
+| Frame | Distinct rigs among world draws |
+| ----- | ------------------------------: |
+| 2314 | 43 |
+| 4264 | 71 |
+| 1289 | 129 |
+
+and the disagreement is not small. On frame 2314, 423 of 832 world draws
+carry `dir = (-0.187, -0.962, 0.200)` with the hemisphere axis pointing
+down — while 45 carry `(-0.187, +0.387, 0.200)`, the vertical component
+flipped, and 23 more have no hemisphere axis at all.
+
+Publishing at `Present` therefore latched whichever rig the frame ended on,
+and it changed whenever the mix of draws changed. "The light source changes
+during the game" and "the shadows change after a camera transition" are that
+one fault seen twice.
+
+The frame votes now: every world draw's rig is counted, weighted by its
+triangles so the pitch and the stands outweigh a few hundred overlay quads,
+and the winner is published at the end of the frame. Candidates that do not
+fit the sixteen-entry ballot are counted, because a vote that cannot find the
+majority should say so rather than mis-light the scene quietly.
+
+### 4.7 Menu rendering, for contrast
 
 From a title/menu session (121 frames): 3.3 draws per frame, 65
 `SetRenderState` calls of which 50 redundant, and two screen-space FVFs —

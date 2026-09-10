@@ -78,7 +78,11 @@ namespace
     // How often a texture already sent is read back and checked against what
     // was sent. Staggered by id, so with a few hundred textures resident this
     // is a couple of surface reads a frame rather than a burst.
-    const uint64_t kTextureRecheckFrames = 240;
+    // At 60 fps this is a second, so a texture the game animates is picked
+    // up within one. It was four, chosen when the ring was carrying 94 KB of
+    // geometry per frame and every surface read mattered; with the morph
+    // deltas no longer re-uploading there is room for this.
+    const uint64_t kTextureRecheckFrames = 60;
 
     // A hash of what was sent. Sparse on purpose: enough samples to separate
     // two different textures of the same size, few enough to be free next to
@@ -259,6 +263,24 @@ namespace
     // place this should be a handful per session - one per lighting change
     // the game makes - rather than one per camera move.
     uint64_t g_lightingChanges  = 0;
+
+    // ── Why a texture that should be changing is not ─────────────────────
+    //
+    // The advertising hoardings scroll in the game and stand still here.
+    // Their draws settle it as far as the draw call goes: texture 3418, a
+    // 6253x102 strip, UVs tiling u across 0..3 with WRAP - and neither the
+    // UVs nor the bound texture changes over hundreds of frames. So the
+    // animation must be in the texture's pixels, and the check that is meant
+    // to notice that has fired exactly zero times in a 15,115-frame session.
+    //
+    // Zero is ambiguous: the check might never run, the readback might fail
+    // every time, or the content might genuinely be identical. These tell
+    // the three apart, because guessing between them is how the last three
+    // iterations went.
+    uint64_t g_texRecheckDue     = 0;   // interval elapsed, check attempted
+    uint64_t g_texRecheckUnread  = 0;   // could not read the surface back
+    uint64_t g_texRecheckSame    = 0;   // read it, fingerprint unchanged
+    uint64_t g_texRecheckShape   = 0;   // size or format changed outright
 
     uint64_t g_skippedLayout        = 0;   // no position at 0, or too small
     uint64_t g_skippedNoDeclaration = 0;   // shader created before the hook
@@ -1009,21 +1031,38 @@ namespace
                 // Otherwise the content has to be looked at, which costs a
                 // surface read - so only every so often, and staggered by id
                 // so the cost is spread rather than spiking.
-                if (g_stats.framesSent - record.lastCheckFrame <
-                    kTextureRecheckFrames)
-                    return;
+                // Staggered by id so the cost spreads over the interval
+                // rather than every texture re-reading on the same frame.
+                const uint64_t due = record.lastCheckFrame +
+                                     kTextureRecheckFrames +
+                                     (info->id % kTextureRecheckFrames);
+                if (g_stats.framesSent < due) return;
                 record.lastCheckFrame = g_stats.framesSent;
+                ++g_texRecheckDue;
 
                 const uint32_t fmt = TranslateTextureFormat(info->format);
                 std::vector<uint8_t> current;
                 bool viaCopy = false;
                 if (!ReadTextureLevel0(device, live, fmt, now, current, viaCopy))
-                    return;   // unreadable this time; keep what was sent
+                {
+                    // Unreadable this time; keep what was sent. Counted,
+                    // because a texture that is never readable is
+                    // indistinguishable from one that never changes.
+                    ++g_texRecheckUnread;
+                    return;
+                }
 
                 if (FingerprintTexture(now.Width, now.Height,
                                        (uint32_t)now.Format, current) ==
                     record.fingerprint)
+                {
+                    ++g_texRecheckSame;
                     return;
+                }
+            }
+            else
+            {
+                ++g_texRecheckShape;
             }
 
             // Changed. Fall through and send it again under the same id: from
@@ -1180,6 +1219,15 @@ void Shutdown()
                 (unsigned long long)g_uvTransformDraws,
                 (unsigned long long)g_uvUnrecognised,
                 (unsigned long long)g_programUndecoded);
+
+    Logger::Log("[Export] Texture content re-checks: %llu due, of which %llu "
+                "could not be read back, %llu were unchanged, %llu changed "
+                "shape outright. A texture the game animates in place shows "
+                "up as changes; all-unread means the check cannot see it.",
+                (unsigned long long)g_texRecheckDue,
+                (unsigned long long)g_texRecheckUnread,
+                (unsigned long long)g_texRecheckSame,
+                (unsigned long long)g_texRecheckShape);
 
     Logger::Log("[Export] Lighting rig published %llu times (%llu candidate "
                 "rigs did not fit the ballot). One per lighting change the "

@@ -78,6 +78,8 @@ namespace
             "  --trace-height <n> traced image height; the width follows the\n"
             "                     game aspect ratio (default 720, 0 = off)\n"
             "  --save-frame <n>   write the nth traced frame to disk\n"
+            "  --dump-instances <n>  print every instance of the nth frame:\n"
+            "                     texture, triangles, UV range, world bounds\n"
             "  --texture-budget <n>  texture uploads per frame (default 8)\n"
             "  --save-every <n>   write every nth traced frame, numbered\n"
             "  --save-path <file> where to write it (default traced_frame.png;\n"
@@ -1531,6 +1533,90 @@ namespace
         return g_failures == 0 ? 0 : 1;
     }
 
+    // Everything the builder knows about one frame's draws, one line each.
+    //
+    // Written because finding a particular thing on screen - the advertising
+    // hoardings, say - by reading the game's old frame captures kept landing
+    // on the wrong draws: what a capture holds is a menu or a different
+    // stadium, and the draw that is actually painting the hoarding in the
+    // frame being looked at is not in it. This says what the renderer has,
+    // for the frame it is rendering.
+    void DumpInstances(const Host::SceneReceiver& rx,
+                       const Host::AccelBuilder& accel, uint64_t frameIndex)
+    {
+        const Host::Frame& f = rx.CurrentFrame();
+        const Host::Math::Mat4& inv = accel.InverseViewProj();
+
+        printf("\n-------- frame %llu: %zu instances --------\n",
+               (unsigned long long)frameIndex, f.instances.size());
+        printf("%4s %10s %6s %5s %6s %-22s %-30s %s\n",
+               "i", "geometry", "tex", "tris", "flags", "uv range",
+               "world bounds (centre / size)", "notes");
+
+        for (size_t i = 0; i < f.instances.size(); ++i)
+        {
+            const SceneIPC::InstanceDesc& in = f.instances[i];
+            const Host::Geometry* g = rx.FindGeometry(in.geometryId);
+            if (!g) continue;
+
+            const uint32_t tris = g->desc.indexCount ? g->desc.indexCount / 3
+                                                     : g->desc.vertexCount / 3;
+
+            // The UV range as the renderer will sample it, transform included.
+            float ul = 1e30f, uh = -1e30f, vl = 1e30f, vh = -1e30f;
+            if (g->desc.uvOffset != SceneIPC::kNoVertexAttribute &&
+                g->desc.vertexStride >= g->desc.uvOffset + 8)
+            {
+                const std::array<float,6>& t = (i < f.uvTransforms.size())
+                    ? f.uvTransforms[i]
+                    : std::array<float,6>{1.0f,0.0f,0.0f,1.0f,0.0f,0.0f};
+                for (uint32_t v = 0; v < g->desc.vertexCount; ++v)
+                {
+                    const float* uv = (const float*)(g->vertices.data() +
+                        (size_t)v * g->desc.vertexStride + g->desc.uvOffset);
+                    const float u = uv[0]*t[0] + uv[1]*t[2] + t[4];
+                    const float w = uv[0]*t[1] + uv[1]*t[3] + t[5];
+                    ul = (u < ul) ? u : ul;  uh = (u > uh) ? u : uh;
+                    vl = (w < vl) ? w : vl;  vh = (w > vh) ? w : vh;
+                }
+            }
+
+            // World bounds, through the same factorisation the builder uses.
+            Host::Math::Mat4 world = Host::Math::Multiply(in.clipTransform, inv);
+            float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
+            for (uint32_t v = 0; v < g->desc.vertexCount; ++v)
+            {
+                const float* q = (const float*)(g->vertices.data() +
+                    (size_t)v * g->desc.vertexStride);
+                for (int k = 0; k < 3; ++k)
+                {
+                    const float c = q[0]*world.m[k] + q[1]*world.m[4+k] +
+                                    q[2]*world.m[8+k] + world.m[12+k];
+                    lo[k] = (c < lo[k]) ? c : lo[k];
+                    hi[k] = (c > hi[k]) ? c : hi[k];
+                }
+            }
+
+            char flags[8] = "......";
+            if (in.flags & SceneIPC::kInstanceAlphaBlend)   flags[0] = 'B';
+            if (in.flags & SceneIPC::kInstanceAlphaTest)    flags[1] = 'T';
+            if (in.flags & SceneIPC::kInstanceNoDepthWrite) flags[2] = 'z';
+            if (in.flags & SceneIPC::kInstanceDepthAlways)  flags[3] = 'A';
+            if (in.flags & SceneIPC::kInstanceUvTransform)  flags[4] = 'U';
+            if (in.flags & SceneIPC::kInstanceMorphWeights) flags[5] = 'M';
+
+            printf("%4zu %10llx %6llu %5u %6s u%6.2f..%-6.2f v%6.2f..%-6.2f "
+                   "(%7.0f %7.0f %7.0f / %6.0f %6.0f %6.0f) %s%s\n",
+                   i, (unsigned long long)(in.geometryId & 0xFFFFFFFFull),
+                   (unsigned long long)in.baseTextureId, tris, flags,
+                   ul, uh, vl, vh,
+                   (lo[0]+hi[0])*0.5f, (lo[1]+hi[1])*0.5f, (lo[2]+hi[2])*0.5f,
+                   hi[0]-lo[0], hi[1]-lo[1], hi[2]-lo[2],
+                   g->desc.boneCount ? "skinned " : "",
+                   g->desc.morphTargets ? "morphed" : "");
+        }
+    }
+
     void ReportAccel(const Host::AccelStats& st)
     {
         printf("    AS: %u BLAS (%u rebuilt) | %u sprites -> %u tris merged | "
@@ -1682,6 +1768,7 @@ int main(int argc, char** argv)
     // to keep it or the result comes out stretched. Only height is chosen.
     uint32_t    traceHeight = 720;
     uint64_t    saveFrame = 0;             // 1-based; 0 = never save
+    uint64_t    dumpInstances = 0;         // 1-based; 0 = never dump
     uint64_t    saveEvery = 0;             // 0 = off
     // Each upload stalls on a queue wait, so a frame bringing in a hundred
     // new textures would hitch badly. The rest arrive over the following
@@ -1724,6 +1811,8 @@ int main(int argc, char** argv)
             traceHeight = (uint32_t)strtoul(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--save-frame") && i + 1 < argc)
             saveFrame = strtoull(argv[++i], nullptr, 10);
+        else if (!strcmp(argv[i], "--dump-instances") && i + 1 < argc)
+            dumpInstances = strtoull(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--save-every") && i + 1 < argc)
             saveEvery = strtoull(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--texture-budget") && i + 1 < argc)
@@ -1891,6 +1980,9 @@ int main(int argc, char** argv)
                    accel.LastError().c_str());
             break;
         }
+
+        if (dumpInstances && rx.Stats().framesCompleted == dumpInstances)
+            DumpInstances(rx, accel, rx.CurrentFrame().begin.frameIndex);
 
         // ── Bring the tracer up on the first frame ───────────────────
         // Only attempted once: if the shaders are missing, retrying every
