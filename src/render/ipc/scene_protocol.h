@@ -166,18 +166,31 @@ namespace SceneIPC
         // entirely - it reads stream 0 and nothing else - so every player
         // rendered in the shader's neutral pose.
         //
-        // The blend happens in the producer and the positions above are the
-        // result, so a consumer needs nothing from this beyond a record of
-        // what was applied. It is worth reporting because it is measurable:
-        // the weights are static for a build morph and change for an
-        // expression, and which of those a draw is decides whether the
-        // geometry re-uploads.
+        // How many delta streams follow the indices in this message's
+        // payload - `morphTargets * vertexCount` float3s, target-major. The
+        // weights ride on the instance, because the deltas never change and
+        // the weights do.
         //
-        // Zero in anything captured before morph blending existed, which is
-        // exactly what it means: no deltas applied.
+        // The blend was tried in the producer first, and the numbers say why
+        // it moved here. Blending there rewrites the positions, so the
+        // content hash changes whenever a weight does, and a session's
+        // geometry traffic went from 5 KB per frame to 94 KB - 685 MB of
+        // re-uploads over 7,800 frames, 97% of it morphed meshes. That
+        // saturated the ring, and a full ring drops the *draw*: 118 world
+        // draws per frame never sent at all, which on screen is pitch
+        // markings and patterns flickering in and out.
+        //
+        // Deltas are static, so this way the mesh uploads once.
+        //
+        // Zero means no deltas - which is also what a recording made before
+        // this field carried them reads as, since a consumer that finds no
+        // room for them in the payload treats the geometry as already
+        // blended rather than reading past the end.
         uint32_t morphTargets;
         // Payload follows: vertexCount*vertexStride bytes, then
-        // indexCount*indexStride bytes, each padded to 8 bytes.
+        // indexCount*indexStride bytes, then
+        // morphTargets*vertexCount*12 bytes of float3 deltas,
+        // each section padded to 8 bytes.
     };
 
     // ── Textures ─────────────────────────────────────────────────────────
@@ -351,11 +364,21 @@ namespace SceneIPC
         // this draw goes over whatever is already there, whatever the depth
         // says. Distinct from kInstanceNoDepthWrite, which only says it must
         // not occlude what comes after.
-        kInstanceDepthAlways  = 1u << 8
+        kInstanceDepthAlways  = 1u << 8,
+
+        // The instance payload carries the morph weights, after the palette
+        // and after the texture transform: kMaxMorphTargets floats, in the
+        // order the shader applies them (c81.xyzw then c82.xyzw). Only the
+        // first GeometryDesc::morphTargets of them mean anything.
+        kInstanceMorphWeights = 1u << 9
     };
 
-    // The texture transform's payload, when kInstanceUvTransform is set.
-    static const uint32_t kUvTransformBytes = 32;   // two float4 rows
+    // Optional instance payload sections, in this order after the bone
+    // palette. Appended rather than inserted so that the palette keeps the
+    // offset it has always had and older recordings still read correctly.
+    static const uint32_t kUvTransformBytes  = 32;   // two float4 rows
+    static const uint32_t kMaxMorphTargets   = 8;
+    static const uint32_t kMorphWeightBytes  = kMaxMorphTargets * 4;
 
     // The game's own lighting rig, read from vertex shader constants rather
     // than invented — see docs/RENDERER.md §4.3.

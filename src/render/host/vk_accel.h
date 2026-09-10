@@ -54,6 +54,22 @@ namespace Host
     void SkinVertices(const Geometry& geo, const std::vector<float>& palette,
                       float indexScale, uint8_t* dst);
 
+    // Applies the game's morph weights to one mesh, writing the blended
+    // positions over the base ones. `dst` must have room for
+    // desc.vertexCount * desc.vertexStride bytes.
+    //
+    // The shader's own arithmetic:
+    //
+    //     mov   r11,      v0
+    //     mad   r11.xyz,  v3, c81.x, r11
+    //     mad   r11.xyz,  v4, c81.y, r11
+    //     ...
+    //
+    // so the deltas add, unnormalised, in the order the shader applies them.
+    // Only the position moves - the shader lights from the unmorphed normal
+    // in v1, and reproducing that means leaving the normal alone.
+    void MorphVertices(const Geometry& geo, const float* weights, uint8_t* dst);
+
     // InstanceRecord::flags, mirrored in shaders/common.glsl.
     enum RecordFlags : uint32_t
     {
@@ -161,6 +177,12 @@ namespace Host
 
         // Blended instances taking coverage from the vertex colour.
         uint32_t vertexAlphaDraws;
+
+        // Morphed meshes whose pose moved this frame, and those whose did
+        // not. A build morph is static and should land almost entirely in
+        // the second column; an expression in the first.
+        uint32_t morphRebuilds;
+        uint32_t morphReused;
 
         // Instances carrying the game's own affine texture transform - the
         // advertising hoardings and anything else windowing an atlas. Zero
@@ -367,8 +389,18 @@ namespace Host
             uint32_t  triangleCount;
             uint64_t  lastUsedFrame;
 
+            // The morph pose this structure was built with, and whether it
+            // was built with one at all. A morphed mesh only rebuilds when
+            // its weights change - a build morph is set once per player and
+            // never moves, while a facial expression moves every frame, and
+            // rebuilding both every frame is what re-uploading in the
+            // producer amounted to.
+            bool      hasMorph;
+            float     morphWeights[SceneIPC::kMaxMorphTargets];
+
             MeshBlas() : geometryId(0), contentHash(0), triangleCount(0)
-                       , lastUsedFrame(0) {}
+                       , lastUsedFrame(0), hasMorph(false)
+            { memset(morphWeights, 0, sizeof(morphWeights)); }
         };
 
         // One structure build, prepared but not yet recorded.
@@ -422,9 +454,13 @@ namespace Host
         // `palette` is the instance's bone pose, or null for a rigid mesh.
         // Skinning happens during the copy into the BLAS buffer, since that
         // pass has to touch every vertex anyway.
+        // `morphWeights` is the instance's morph pose, or null. Blended in
+        // the same copy and for the same reason as the bone palette: the
+        // deltas are static and cached, only the weights change per frame.
         bool PrepareMeshBlas(const Geometry& geo, MeshBlas& out, PendingBuild& job,
                              const std::vector<float>* palette = nullptr,
-                             float indexScale = 0.0f);
+                             float indexScale = 0.0f,
+                             const float* morphWeights = nullptr);
         bool PrepareSpriteBlas(const std::vector<float>& positions, PendingBuild& job);
         bool PrepareTlas(const std::vector<VkAccelerationStructureInstanceKHR>& instances,
                          PendingBuild& job);

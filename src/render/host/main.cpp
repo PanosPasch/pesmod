@@ -66,7 +66,8 @@ namespace
             "  --quiet            only print the summary\n"
             "  --probe            create the Vulkan RT device, report, exit\n"
             "  --astest           trace a synthetic scene, self-check, exit\n"
-            "  --skintest         check the skinning kernel, exit\n"
+            "  --skintest         check the skinning and morph kernels,\n"
+            "                     exit\n"
             "  --resendtest       check the resend loop (no GPU), exit\n"
             "  --replaytest       check record/replay (no GPU), exit\n"
             "  --record <file>    tee the scene stream to a file\n"
@@ -773,6 +774,76 @@ namespace
               out[1].weights[2] == src[1].weights[2],
               "bone data passes through untouched");
 
+        // ── Morph targets ────────────────────────────────────────────────
+        //
+        // Same argument for testing it as for the skinning kernel: this
+        // mirrors the game's vertex shader, and whether it mirrors it
+        // correctly is the one thing looking at the output cannot say.
+        {
+            printf("\n-------- morph target kernel --------\n\n");
+
+            Host::Geometry m;
+            memset(&m.desc, 0, sizeof(m.desc));
+            m.desc.vertexKind   = SceneIPC::kVertexLit;
+            m.desc.vertexStride = sizeof(SkinVertex);
+            m.desc.vertexCount  = 2;
+            m.desc.normalOffset = 20;
+            m.desc.uvOffset     = 32;
+            m.desc.colorOffset  = SceneIPC::kNoVertexAttribute;
+            m.desc.morphTargets = 2;
+
+            SkinVertex base[2];
+            memset(base, 0, sizeof(base));
+            base[0].px = 1.0f; base[0].py = 2.0f; base[0].pz = 3.0f;
+            base[0].ny = 1.0f; base[0].u = 0.25f; base[0].v = 0.75f;
+            base[1] = base[0];
+            m.vertices.assign((const uint8_t*)base,
+                              (const uint8_t*)base + sizeof(base));
+
+            // Target-major: both vertices of stream 1, then both of stream 2.
+            const float deltas[] = {
+                10.0f, 0.0f,   0.0f,    10.0f, 0.0f,   0.0f,   // target 0
+                 0.0f, 0.0f, 100.0f,     0.0f, 0.0f, 100.0f    // target 1
+            };
+            m.morphDeltas.assign(deltas, deltas + 12);
+
+            float w[SceneIPC::kMaxMorphTargets];
+            memset(w, 0, sizeof(w));
+            w[0] = 0.5f;
+            w[1] = 0.25f;
+
+            std::vector<uint8_t> md(sizeof(base));
+            Host::MorphVertices(m, w, md.data());
+            const SkinVertex* mo = (const SkinVertex*)md.data();
+
+            // x = 1 + 0.5*10 = 6; z = 3 + 0.25*100 = 28. The shader adds
+            // unnormalised, so nothing is divided by the weight sum.
+            check(close(mo[0].px, 6.0f) && close(mo[0].py, 2.0f) &&
+                  close(mo[0].pz, 28.0f),
+                  "deltas add, each scaled by its own weight");
+
+            // The shader lights from v1, which no morph instruction touches.
+            check(close(mo[0].nx, 0.0f) && close(mo[0].ny, 1.0f) &&
+                  close(mo[0].nz, 0.0f),
+                  "the normal is left alone, as the shader leaves it");
+
+            check(mo[1].u == base[1].u && mo[1].v == base[1].v,
+                  "texture coordinates pass through untouched");
+
+            // A zero weight must cost nothing and change nothing.
+            memset(w, 0, sizeof(w));
+            Host::MorphVertices(m, w, md.data());
+            check(close(mo[0].px, 1.0f) && close(mo[0].pz, 3.0f),
+                  "an all-zero pose leaves the base mesh exactly as it was");
+
+            // Deltas that are not all there must not be read past.
+            m.morphDeltas.resize(6);
+            w[0] = 1.0f;
+            Host::MorphVertices(m, w, md.data());
+            check(close(mo[0].px, 1.0f),
+                  "a short delta payload is refused rather than read past");
+        }
+
         printf("\n%s\n", g_failures == 0 ? "ALL CHECKS PASSED"
                                          : "FAILURES PRESENT");
         return g_failures == 0 ? 0 : 1;
@@ -1478,6 +1549,9 @@ namespace
         if (st.vertexAlphaDraws)
             printf("    coverage: %u blended draws take alpha from the "
                    "vertex colour\n", st.vertexAlphaDraws);
+        if (st.morphRebuilds || st.morphReused)
+            printf("    morph: %u meshes re-posed, %u kept the pose they were "
+                   "built with\n", st.morphRebuilds, st.morphReused);
         if (st.uvTransformedDraws)
             printf("    atlas: %u draws window their texture through the "
                    "game's own transform\n", st.uvTransformedDraws);
@@ -1524,6 +1598,10 @@ namespace
         // were. Zero of these with a match on screen means the producer is
         // not reporting the clear - a different fault from the host
         // ignoring it, and worth being able to tell apart.
+        if (s.geometryPreBlended)
+            printf("  pre-blended meshes   %llu geometry uploads declared morph "
+                   "targets but carried no deltas (an older recording)\n",
+                   (unsigned long long)s.geometryPreBlended);
         printf("  offscreen passes     %llu clears voided %llu instances "
                "(%.1f per frame)\n",
                (unsigned long long)s.framesReset,

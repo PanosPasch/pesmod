@@ -28,9 +28,11 @@ namespace
     std::vector<uint8_t> g_vertexScratch;
     std::vector<uint8_t> g_indexScratch;
 
-    // One morph delta stream at a time; reused across streams and draws so
-    // the hot path stays free of allocation once it is warm.
+    // One morph delta stream at a time, and the packed float3 deltas for
+    // every stream of one draw. Reused across draws so the hot path stays
+    // free of allocation once it is warm.
     std::vector<uint8_t> g_morphScratch;
+    std::vector<uint8_t> g_morphPayload;
 
     // Geometry slices already uploaded, and the content hash they were
     // uploaded with. A slice whose hash changes has been re-skinned by the
@@ -122,6 +124,82 @@ namespace
     LightingDesc g_lastLighting;
     bool         g_lightingSent = false;
 
+    // ── Which lighting rig is the frame's? ───────────────────────────────
+    //
+    // The rig is read from vertex shader constants, and those hold whatever
+    // the last draw put there. That is not one value per frame: a match
+    // frame carries 43 to 129 distinct rigs, and they are not small
+    // variations. On frame 2314, 423 of 832 world draws agree on
+    // dir = (-0.187, -0.962, 0.200) with the hemisphere axis pointing down -
+    // and 45 others carry (-0.187, +0.387, 0.200), the vertical component
+    // flipped, while 23 more have no hemisphere axis at all.
+    //
+    // Publishing at Present therefore latched whichever rig the frame
+    // happened to end on. It changed whenever the mix of draws changed,
+    // which is what "the light source changes during the game" and "the
+    // shadows change after a camera transition" both are: the same fault
+    // seen twice.
+    //
+    // So the frame votes. Every world draw's rig is counted, weighted by its
+    // triangles - the pitch and the stands carry the rig that lights the
+    // scene, and a few hundred tiny overlay quads should not be able to
+    // outvote them - and the winner is published at the end of the frame.
+    //
+    // Sixteen candidates is generous: the weight is concentrated in one or
+    // two, and the tail is what this exists to reject.
+    const uint32_t kMaxLightingCandidates = 16;
+
+    struct LightingVote
+    {
+        LightingDesc rig;
+        uint64_t     weight;
+    };
+    LightingVote g_lightingVotes[kMaxLightingCandidates];
+    uint32_t     g_lightingVoteCount = 0;
+
+    // Rigs seen beyond the candidate table. A steady non-zero value would
+    // mean the table is too small to find the majority, which is worth
+    // knowing rather than silently mis-lighting the scene.
+    uint64_t g_lightingVotesOverflowed = 0;
+
+    void ReadLightingRig(const DeviceState& state, LightingDesc& L)
+    {
+        // Register assignments come from disassembling the game's own vertex
+        // shaders; see docs/RENDERER.md 4.3.
+        memset(&L, 0, sizeof(L));
+        memcpy(L.directionalDir,   state.vsConstants[95], sizeof(float) * 4);
+        memcpy(L.directionalColor, state.vsConstants[94], sizeof(float) * 4);
+        memcpy(L.hemisphereAxis,   state.vsConstants[93], sizeof(float) * 4);
+        memcpy(L.skyColor,         state.vsConstants[92], sizeof(float) * 4);
+        memcpy(L.groundColor,      state.vsConstants[91], sizeof(float) * 4);
+        memcpy(L.ambient,          state.vsConstants[68], sizeof(float) * 4);
+        memcpy(L.specularColor,    state.vsConstants[70], sizeof(float) * 4);
+        memcpy(L.specularHalfDir,  state.vsConstants[63], sizeof(float) * 4);
+        memcpy(L.lightingScale,    state.vsConstants[69], sizeof(float) * 4);
+    }
+
+    void VoteForLighting(const DeviceState& state, uint32_t triangles)
+    {
+        LightingDesc L;
+        ReadLightingRig(state, L);
+
+        for (uint32_t i = 0; i < g_lightingVoteCount; ++i)
+            if (memcmp(&g_lightingVotes[i].rig, &L, sizeof(L)) == 0)
+            {
+                g_lightingVotes[i].weight += triangles;
+                return;
+            }
+
+        if (g_lightingVoteCount >= kMaxLightingCandidates)
+        {
+            ++g_lightingVotesOverflowed;
+            return;
+        }
+        g_lightingVotes[g_lightingVoteCount].rig    = L;
+        g_lightingVotes[g_lightingVoteCount].weight = triangles;
+        ++g_lightingVoteCount;
+    }
+
     void PruneSentGeometry(uint64_t frameIndex)
     {
         if (frameIndex < kGeometryRetentionFrames) return;
@@ -176,6 +254,11 @@ namespace
     // sending them: an offscreen pass, not part of the picture.
     uint64_t g_frameResets      = 0;
     uint64_t g_instancesVoided  = 0;
+
+    // How many times the published rig actually changed. With the vote in
+    // place this should be a handful per session - one per lighting change
+    // the game makes - rather than one per camera move.
+    uint64_t g_lightingChanges  = 0;
 
     uint64_t g_skippedLayout        = 0;   // no position at 0, or too small
     uint64_t g_skippedNoDeclaration = 0;   // shader created before the hook
@@ -235,12 +318,14 @@ namespace
         return h;
     }
 
-    uint32_t HashBytes(const void* data, size_t bytes)
+    // `seed` continues an earlier hash, so a payload made of several
+    // sections - vertices then morph deltas - hashes as one thing.
+    uint32_t HashBytes(const void* data, size_t bytes, uint32_t seed = 2166136261u)
     {
         // FNV-1a. Cheap enough to run over a draw's vertex range every frame,
         // which is what detects re-skinned geometry.
         const uint8_t* p = (const uint8_t*)data;
-        uint32_t h = 2166136261u;
+        uint32_t h = seed;
         for (size_t i = 0; i < bytes; ++i)
         {
             h ^= p[i];
@@ -1096,6 +1181,13 @@ void Shutdown()
                 (unsigned long long)g_uvUnrecognised,
                 (unsigned long long)g_programUndecoded);
 
+    Logger::Log("[Export] Lighting rig published %llu times (%llu candidate "
+                "rigs did not fit the ballot). One per lighting change the "
+                "game makes is right; one per camera move means the vote is "
+                "not finding the majority.",
+                (unsigned long long)g_lightingChanges,
+                (unsigned long long)g_lightingVotesOverflowed);
+
     Logger::Log("[Export] Offscreen passes discarded: %llu mid-frame target "
                 "clears voided %llu instances (%.1f per frame) that the game "
                 "drew and then threw away.",
@@ -1245,21 +1337,27 @@ void EndFrame()
 
 void UpdateLighting(const DeviceState& state)
 {
+    (void)state;   // the frame's own draws decide the rig, not the last one
     if (!g_active) return;
 
-    // Register assignments come from disassembling the game's own vertex
-    // shaders; see docs/RENDERER.md §4.3.
+    // The frame's rig is the one its geometry mostly used, not whichever one
+    // the last draw left in the constant file. See VoteForLighting.
     LightingDesc L;
-    memset(&L, 0, sizeof(L));
-    memcpy(L.directionalDir,   state.vsConstants[95], sizeof(float) * 4);
-    memcpy(L.directionalColor, state.vsConstants[94], sizeof(float) * 4);
-    memcpy(L.hemisphereAxis,   state.vsConstants[93], sizeof(float) * 4);
-    memcpy(L.skyColor,         state.vsConstants[92], sizeof(float) * 4);
-    memcpy(L.groundColor,      state.vsConstants[91], sizeof(float) * 4);
-    memcpy(L.ambient,          state.vsConstants[68], sizeof(float) * 4);
-    memcpy(L.specularColor,    state.vsConstants[70], sizeof(float) * 4);
-    memcpy(L.specularHalfDir,  state.vsConstants[63], sizeof(float) * 4);
-    memcpy(L.lightingScale,    state.vsConstants[69], sizeof(float) * 4);
+    uint64_t best = 0;
+    bool     have = false;
+    for (uint32_t i = 0; i < g_lightingVoteCount; ++i)
+        if (g_lightingVotes[i].weight > best)
+        {
+            best = g_lightingVotes[i].weight;
+            L    = g_lightingVotes[i].rig;
+            have = true;
+        }
+
+    // A frame with no world geometry at all - a menu, a wipe - keeps
+    // whatever was last published rather than inventing a rig from
+    // constants no draw used.
+    g_lightingVoteCount = 0;
+    if (!have) return;
 
     // Only resend on change: the rig is stable for long stretches and the
     // host carries the last value across frames.
@@ -1269,6 +1367,7 @@ void UpdateLighting(const DeviceState& state)
     {
         g_lastLighting = L;
         g_lightingSent = true;
+        ++g_lightingChanges;
     }
 }
 
@@ -1352,7 +1451,7 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
 
     // ── Morph targets ────────────────────────────────────────────────────
     //
-    // The shader adds weighted deltas from streams 1..6 to stream 0's
+    // The shader adds weighted deltas from the other streams to stream 0's
     // position before transforming it:
     //
     //     mov   r11,      v0
@@ -1360,18 +1459,21 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
     //     ...
     //     m4x4  oPos,     r11, c58
     //
-    // Applied here rather than sent for the host to apply, because the
-    // weights are the game's own and almost always static - a build morph
-    // is set once per player and never changes - so the blended positions
-    // hash identically frame to frame and upload exactly once. Sending the
-    // deltas separately would cost a payload per stream and buy nothing
-    // except for the draws whose weights genuinely animate, which are the
-    // small ones.
+    // The deltas are gathered here and sent with the geometry; the weights
+    // go on the instance and the host does the blend.
     //
-    // Measured on the capture set: 110 morph draws in a match frame,
-    // sharing two distinct weight sets between them, unchanged across
-    // frames a hundred apart.
-    uint32_t morphApplied = 0;
+    // Blending here instead was tried, and measured badly: the weights
+    // animate in play, so every blended mesh re-uploaded every frame. Over
+    // 7,800 frames that was 685 MB of re-uploads, 97% of it morphed
+    // geometry, and geometry traffic went from 5 KB per frame to 94 KB. The
+    // ring could not absorb it, and a full ring drops the *draw* - a failed
+    // geometry write returns before the instance is written - so 118 world
+    // draws per frame were never sent. That is the pitch's markings and
+    // patterns flickering in and out.
+    //
+    // Deltas never change, so gathering them costs one upload per mesh.
+    uint32_t morphTargets = 0;
+    g_morphPayload.clear();
     if (layout.program.morphCount && stride >= 12)
     {
         for (uint32_t m = 0; m < layout.program.morphCount; ++m)
@@ -1381,44 +1483,33 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
                 streamIndex >= D3D8_MAX_STREAMS)
             {
                 ++g_morphStreamsMissing;
-                continue;
+                break;      // the weights are positional; a gap would misalign
             }
 
             const StreamBinding& src = state.stream[streamIndex];
             if (!src.buffer || src.stride < layout.morphOffset[m] + 12)
             {
                 ++g_morphStreamsMissing;
-                continue;
+                break;
             }
-
-            const ShaderAnalysis::MorphTarget& t = layout.program.morph[m];
-            if (t.weightRegister >= kMaxVsConstants) continue;
-            const float weight =
-                state.vsConstants[t.weightRegister][t.weightComponent];
-            if (weight == 0.0f) continue;   // contributes nothing; skip the read
 
             if (!ReadVertexRange(src.buffer, firstVertex * src.stride,
                                  vertexCount * src.stride, g_morphScratch))
             {
                 ++g_morphStreamsMissing;
-                continue;
+                break;
             }
 
-            uint8_t* dst = g_vertexScratch.data();
-            const uint8_t* delta = g_morphScratch.data() + layout.morphOffset[m];
+            // Packed tight as float3s, whatever the source stride was.
+            const size_t at = g_morphPayload.size();
+            g_morphPayload.resize(at + (size_t)vertexCount * 12);
+            const uint8_t* in = g_morphScratch.data() + layout.morphOffset[m];
             for (uint32_t v = 0; v < vertexCount; ++v)
-            {
-                float pos[3], d[3];
-                memcpy(pos, dst + (size_t)v * stride, sizeof(pos));
-                memcpy(d,   delta + (size_t)v * src.stride, sizeof(d));
-                pos[0] += d[0] * weight;
-                pos[1] += d[1] * weight;
-                pos[2] += d[2] * weight;
-                memcpy(dst + (size_t)v * stride, pos, sizeof(pos));
-            }
-            ++morphApplied;
+                memcpy(g_morphPayload.data() + at + (size_t)v * 12,
+                       in + (size_t)v * src.stride, 12);
+            ++morphTargets;
         }
-        if (morphApplied) ++g_morphDraws;
+        if (morphTargets) ++g_morphDraws;
     }
 
     // Read the draw's own indices, then expand whatever topology it used
@@ -1452,6 +1543,10 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
     if (builder.emitted == 0) { ++g_stats.drawsSkipped; return; }
     g_indicesOutOfSlice += builder.rejected;
 
+    // This draw's opinion of what the lighting rig is, weighted by how much
+    // of the frame it is. See VoteForLighting for why a frame needs a vote.
+    VoteForLighting(state, builder.emitted);
+
     const uint32_t indexStride = builder.stride;
     const uint32_t indexCount  = builder.emitted * 3;
 
@@ -1459,8 +1554,11 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
     // Hashing the vertex range every frame is what catches re-skinned
     // players: the game does CPU skinning, so their vertices are rewritten
     // in place and the buffer id alone would look unchanged.
-    const uint32_t contentHash = HashBytes(g_vertexScratch.data(),
-                                           g_vertexScratch.size());
+    uint32_t contentHash = HashBytes(g_vertexScratch.data(),
+                                     g_vertexScratch.size());
+    if (!g_morphPayload.empty())
+        contentHash = HashBytes(g_morphPayload.data(), g_morphPayload.size(),
+                                contentHash);
 
     RecordChurn(vbInfo->id, ibInfo ? ibInfo->id : 0u, info, vertexCount,
                 geometryId, g_frameIndex);
@@ -1483,13 +1581,14 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
         gd.boneCount        = layout.boneCount;
         gd.boneIndexOffset  = layout.boneIndexOffset;
         gd.boneWeightOffset = layout.boneWeightOffset;
-        gd.morphTargets     = morphApplied;
+        gd.morphTargets     = morphTargets;
 
         // Vertices and indices go as one payload, in that order, matching
         // how GeometryDesc documents the layout.
         std::vector<uint8_t>& payload = g_vertexScratch;
         const size_t vbBytes = payload.size();
         payload.insert(payload.end(), g_indexScratch.begin(), g_indexScratch.end());
+        payload.insert(payload.end(), g_morphPayload.begin(), g_morphPayload.end());
 
         if (g_ring.TryWrite(kMsgGeometry, &gd, sizeof(gd), payload.data(),
                             (uint32_t)payload.size(), false))
@@ -1604,6 +1703,29 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
     }
     if (!layout.program.decoded && !state.VertexShaderIsFvf())
         ++g_programUndecoded;
+
+    // ── Morph weights ────────────────────────────────────────────────────
+    // The deltas went with the geometry and never change; these do, every
+    // frame, and they are 32 bytes rather than a mesh. Appended after the
+    // texture transform so both stay optional and both leave the palette
+    // where it has always been.
+    if (morphTargets)
+    {
+        float w[SceneIPC::kMaxMorphTargets];
+        memset(w, 0, sizeof(w));
+        for (uint32_t m = 0; m < morphTargets &&
+                             m < SceneIPC::kMaxMorphTargets; ++m)
+        {
+            const ShaderAnalysis::MorphTarget& t = layout.program.morph[m];
+            if (t.weightRegister >= kMaxVsConstants) continue;
+            w[m] = state.vsConstants[t.weightRegister][t.weightComponent];
+        }
+
+        const size_t at = palette.size();
+        palette.resize(at + SceneIPC::kMorphWeightBytes);
+        memcpy(palette.data() + at, w, sizeof(w));
+        inst.flags |= kInstanceMorphWeights;
+    }
 
     // Stage 0 is the base map. See InstanceDesc::stageState for the packing
     // and for why it stays inside four bytes.

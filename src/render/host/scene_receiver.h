@@ -32,6 +32,15 @@ namespace Host
         SceneIPC::GeometryDesc desc;
         std::vector<uint8_t>   vertices;
         std::vector<uint8_t>   indices;
+
+        // desc.morphTargets streams of vertexCount float3 deltas, packed
+        // tight and target-major. Static: the game's morph deltas are the
+        // shapes themselves, and only the weights change.
+        //
+        // Empty when a recording was made by a producer that blended in
+        // process, in which case desc.morphTargets is forced to zero on
+        // receipt - the vertices already carry the blend.
+        std::vector<float>     morphDeltas;
         uint64_t               lastUsedFrame;
         bool                   dirty;      // needs (re)upload / BLAS rebuild
     };
@@ -67,6 +76,11 @@ namespace Host
         // payload is optional, and the wire structures are fixed-size.
         std::vector<std::array<float, 6> >  uvTransforms;
 
+        // One entry per instance, parallel to `instances`. The weights the
+        // game's shader applied to that draw's morph deltas, all zero when
+        // it had none.
+        std::vector<std::array<float, SceneIPC::kMaxMorphTargets> > morphWeights;
+
         bool                                complete;   // saw kMsgFrameEnd
         bool                                lightingValid;
     };
@@ -89,6 +103,12 @@ namespace Host
         // picture. See SceneIPC::kMsgFrameReset.
         uint64_t framesReset;
         uint64_t instancesVoided;
+
+        // Geometry that arrived declaring morph targets it did not carry -
+        // a recording from the producer that blended in process. Treated as
+        // already blended, and counted so that is visible rather than
+        // looking like corruption.
+        uint64_t geometryPreBlended;
 
         // Geometry this host was asked to draw but did not have, and so
         // asked the producer to send again. Should settle to zero within a

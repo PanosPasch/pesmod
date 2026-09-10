@@ -11,20 +11,35 @@
  
 void HooksRegistry::InstallAll()
 {
-    Logger::Log("[Hooks] Installing hooks...");
- 
+    // Renderer only: leave every gameplay hook out and install nothing but
+    // the D3D8 interception layer.
+    //
+    // The gameplay mods rewrite team, league and kit data in memory, which
+    // changes what the game draws - different kits, different squads,
+    // different stadium dressing. That is fine when the point is to play,
+    // and unhelpful when the point is to tell whether the renderer is
+    // reproducing the game: a difference on screen could be either. This
+    // makes the renderer's output attributable to the renderer.
+    const bool renderOnly = Config::GetBool("general", "render_only", false);
+
+    Logger::Log(renderOnly ? "[Hooks] Installing hooks (renderer only)..."
+                           : "[Hooks] Installing hooks...");
+
     // Each module's Register() function creates and enables its own hooks.
     // To disable a group of hooks, comment out the relevant line.
-    ClubHooks::Register();
-    LeagueTeamsHook::Register();
+    if (!renderOnly)
+    {
+        ClubHooks::Register();
+        LeagueTeamsHook::Register();
+
+        // Optional / experimental hook groups (disabled by default):
+        // MenuHooks::Register();
+        // PlayerHooks::Register();
+    }
 
     // D3D8 interception layer. Self-gating: does nothing unless
     // [render] enabled=1 in PESMod.ini, so this line is safe to leave in.
     RenderHooks::Register();
-
-    // Optional / experimental hook groups (disabled by default):
-    // MenuHooks::Register();
-    // PlayerHooks::Register();
 
     Logger::Log("[Hooks] All hooks installed.");
 }

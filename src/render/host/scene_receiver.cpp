@@ -121,16 +121,43 @@ void SceneReceiver::HandleMessage(const uint8_t* msg, uint32_t bytes)
             return;
         }
 
+        // Morph deltas follow the indices. A producer that blended in
+        // process declared a count and sent no deltas, so a payload with no
+        // room for them means the vertices are already blended - not a
+        // malformed message. That is what keeps those recordings replayable.
+        uint64_t morphFloats = 0;
+        uint32_t morphTargets = d->morphTargets;
+        if (morphTargets)
+        {
+            const uint64_t want = (uint64_t)morphTargets * d->vertexCount * 12;
+            if (sizeof(GeometryDesc) + vbBytes + ibBytes + want > bodyBytes)
+            {
+                morphTargets = 0;
+                ++m_stats.geometryPreBlended;
+            }
+            else
+            {
+                morphFloats = want / 4;
+            }
+        }
+
         Geometry& g = m_geometry[d->geometryId];
-        m_residentBytes -= (g.vertices.size() + g.indices.size());
+        m_residentBytes -= (g.vertices.size() + g.indices.size() +
+                            g.morphDeltas.size() * sizeof(float));
 
         g.desc = *d;
+        g.desc.morphTargets = morphTargets;
         const uint8_t* p = body + sizeof(GeometryDesc);
         g.vertices.assign(p, p + vbBytes);
         g.indices.assign(p + vbBytes, p + vbBytes + ibBytes);
+        g.morphDeltas.resize((size_t)morphFloats);
+        if (morphFloats)
+            memcpy(g.morphDeltas.data(), p + vbBytes + ibBytes,
+                   (size_t)morphFloats * 4);
         g.dirty = true;
 
-        m_residentBytes += (g.vertices.size() + g.indices.size());
+        m_residentBytes += (g.vertices.size() + g.indices.size() +
+                            g.morphDeltas.size() * sizeof(float));
         m_everReceived.insert(d->geometryId);
         ++m_stats.geometryUploads;
         break;
@@ -178,6 +205,7 @@ void SceneReceiver::HandleMessage(const uint8_t* msg, uint32_t bytes)
         m_building.instances.clear();
         m_building.palettes.clear();
         m_building.uvTransforms.clear();
+        m_building.morphWeights.clear();
         memcpy(&m_building.begin, body, sizeof(FrameBegin));
         m_building.lighting      = carriedLighting;
         m_building.lightingValid = carriedValid;
@@ -238,6 +266,19 @@ void SceneReceiver::HandleMessage(const uint8_t* msg, uint32_t bytes)
         }
         m_building.uvTransforms.push_back(uv);
 
+        // The morph weights come after the texture transform, so where they
+        // start depends on whether that flag is set.
+        std::array<float, kMaxMorphTargets> mw;
+        mw.fill(0.0f);
+        if (inst.flags & kInstanceMorphWeights)
+        {
+            size_t at = sizeof(InstanceDesc) + want;
+            if (inst.flags & kInstanceUvTransform) at += kUvTransformBytes;
+            if (bodyBytes < at + kMorphWeightBytes) ++m_stats.malformedMessages;
+            else memcpy(mw.data(), body + at, kMorphWeightBytes);
+        }
+        m_building.morphWeights.push_back(mw);
+
         m_building.instances.push_back(inst);
         break;
     }
@@ -253,6 +294,7 @@ void SceneReceiver::HandleMessage(const uint8_t* msg, uint32_t bytes)
         m_building.instances.clear();
         m_building.palettes.clear();
         m_building.uvTransforms.clear();
+        m_building.morphWeights.clear();
         break;
     }
 
@@ -341,7 +383,8 @@ uint32_t SceneReceiver::EvictUnused(uint64_t retentionFrames,
     {
         if (it->second.lastUsedFrame >= cutoff) continue;
         candidates.push_back({ it->second.lastUsedFrame, it->first, false,
-                               it->second.vertices.size() + it->second.indices.size() });
+                               it->second.vertices.size() + it->second.indices.size() +
+                               it->second.morphDeltas.size() * sizeof(float) });
     }
     for (auto it = m_textures.begin(); it != m_textures.end(); ++it)
     {
@@ -369,7 +412,8 @@ uint32_t SceneReceiver::EvictUnused(uint64_t retentionFrames,
         {
             auto it = m_geometry.find(c.id);
             if (it == m_geometry.end()) continue;
-            m_residentBytes -= (it->second.vertices.size() + it->second.indices.size());
+            m_residentBytes -= (it->second.vertices.size() + it->second.indices.size() +
+                                it->second.morphDeltas.size() * sizeof(float));
             m_geometry.erase(it);
             ++m_stats.geometryEvicted;
         }

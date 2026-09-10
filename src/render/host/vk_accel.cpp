@@ -122,6 +122,36 @@ void SkinVertices(const Geometry& geo, const std::vector<float>& palette,
         }
     }
 
+void MorphVertices(const Geometry& geo, const float* weights, uint8_t* dst)
+{
+    const SceneIPC::GeometryDesc& d = geo.desc;
+    const uint32_t stride  = d.vertexStride;
+    const uint32_t targets = d.morphTargets;
+
+    memcpy(dst, geo.vertices.data(), geo.vertices.size());
+    if (!targets || geo.morphDeltas.empty()) return;
+
+    // Target-major: all of stream 1's deltas, then all of stream 2's.
+    const size_t perTarget = (size_t)d.vertexCount * 3;
+    if (geo.morphDeltas.size() < perTarget * targets) return;
+
+    for (uint32_t t = 0; t < targets; ++t)
+    {
+        const float w = weights[t];
+        if (w == 0.0f) continue;          // the common case for unused slots
+
+        const float* delta = geo.morphDeltas.data() + perTarget * t;
+        for (uint32_t v = 0; v < d.vertexCount; ++v)
+        {
+            float* p = (float*)(dst + (size_t)v * stride);
+            const float* q = delta + (size_t)v * 3;
+            p[0] += q[0] * w;
+            p[1] += q[1] * w;
+            p[2] += q[2] * w;
+        }
+    }
+}
+
 namespace
 {
     // kDecalBias lives in the header now, because the shaders need it too.
@@ -373,7 +403,8 @@ bool AccelBuilder::LooksLikeSky(const Geometry& geo, const Math::Mat4& world,
 bool AccelBuilder::PrepareMeshBlas(const Geometry& geo, MeshBlas& out,
                                    PendingBuild& job,
                                    const std::vector<float>* palette,
-                                   float indexScale)
+                                   float indexScale,
+                                   const float* morphWeights)
 {
     const RayTracingApi& rt = m_device->RayTracingApi_();
 
@@ -417,6 +448,12 @@ bool AccelBuilder::PrepareMeshBlas(const Geometry& geo, MeshBlas& out,
         geo.desc.boneIndexOffset != SceneIPC::kNoVertexAttribute)
     {
         SkinVertices(geo, *palette, indexScale, (uint8_t*)out.vertices.mapped);
+    }
+    else if (geo.desc.morphTargets && morphWeights)
+    {
+        // Same pass, same reason: the deltas are static and cached, and only
+        // the weights cross the process boundary each frame.
+        MorphVertices(geo, morphWeights, (uint8_t*)out.vertices.mapped);
     }
     else
     {
@@ -1163,25 +1200,53 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
                 ? &frame.palettes[i] : nullptr;
         const bool skinned = geo->desc.boneCount != 0 && palette != nullptr;
 
-        // A static mesh drawn twice shares one structure; a skinned one
-        // cannot, because each instance carries its own pose. Keyed by
-        // geometry id alone, two instances of the same skinned mesh both
-        // rebuilt into the same destination in one command buffer - which is
-        // undefined, and took the device with it.
+        // The morph pose, same shape of argument as the palette.
+        const float* morphWeights =
+            (geo->desc.morphTargets && (inst.flags & kInstanceMorphWeights) &&
+             i < frame.morphWeights.size())
+                ? frame.morphWeights[i].data() : nullptr;
+        const bool morphed = morphWeights != nullptr;
+
+        // A static mesh drawn twice shares one structure; a skinned or
+        // morphed one cannot, because each instance carries its own pose.
+        // Keyed by geometry id alone, two instances of the same skinned mesh
+        // both rebuilt into the same destination in one command buffer -
+        // which is undefined, and took the device with it.
         uint64_t blasKey = inst.geometryId;
-        if (skinned)
+        if (skinned || morphed)
             blasKey = Mix64(inst.geometryId, ++skinnedUse[inst.geometryId]);
 
         MeshBlas& blas = m_meshBlas[blasKey];
         blas.geometryId = inst.geometryId;
 
-        const bool needsBuild = skinned ||
+        // A morph only needs rebuilding when the pose actually moved. A build
+        // morph - the player's physique - is set once and never changes, so
+        // it builds on the first frame and is then as cheap as a rigid mesh;
+        // a facial expression moves and pays for it. Blending in the producer
+        // could not tell those apart and re-sent both, 685 MB of it.
+        bool morphMoved = false;
+        if (morphed)
+        {
+            morphMoved = !blas.hasMorph ||
+                         memcmp(blas.morphWeights, morphWeights,
+                                sizeof(blas.morphWeights)) != 0;
+            if (morphMoved) ++m_stats.morphRebuilds;
+            else            ++m_stats.morphReused;
+        }
+
+        const bool needsBuild = skinned || morphMoved ||
                                 (blas.accel.handle == VK_NULL_HANDLE) ||
                                 (blas.contentHash != geo->desc.contentHash);
         if (needsBuild)
         {
+            if (morphed)
+            {
+                blas.hasMorph = true;
+                memcpy(blas.morphWeights, morphWeights, sizeof(blas.morphWeights));
+            }
             PendingBuild job;
-            if (!PrepareMeshBlas(*geo, blas, job, palette, inst.boneIndexScale))
+            if (!PrepareMeshBlas(*geo, blas, job, palette, inst.boneIndexScale,
+                                 morphWeights))
             {
                 m_meshBlas.erase(blasKey);
                 continue;
