@@ -948,12 +948,22 @@ remains is what turns a correct image into a better one than the game's.
    occluding and non-occluding draws into one structure, so it carries one
    ray mask for all of them and its projected shadows cast shadows of their
    own. Splitting the merge in two would fix it.
-3. **Lighting beyond the game's rig.** The captured constants are the seed —
+3. **Calibrate against the game.** The renderer is systematically off, and
+   by different amounts on different surfaces. Measured on a frame where the
+   game and this renderer sit side by side: the pitch renders 157,173,138
+   against the game's 76,95,51; the crowd 93,92,88 against 58,52,50; a red
+   hoarding 121,100,101 against 156,98,106 — too bright, too bright, and too
+   desaturated. Dropping the final gamma encode, which is arguably encoding
+   twice over a Direct3D 8 output that is already display-referred, fixes
+   the pitch and overshoots the other two. The real gap is that the game
+   bakes its lighting into vertex colours and this replaces it with a traced
+   rig; matching it needs a calibration pass, not a curve.
+4. **Lighting beyond the game's rig.** The captured constants are the seed —
    directional `c95`/`c94`, hemisphere `c93`/`c92`/`c91`, specular
    `c63`/`c70` — then physical stadium floodlights and a sky model. Sky
    occlusion is the first piece of this and is in; specular is next, since
    the constants for it are already being captured.
-4. **Path tracing + denoise.** DLSS Ray Reconstruction is already present in
+5. **Path tracing + denoise.** DLSS Ray Reconstruction is already present in
    the game folder, making it the natural denoiser target. Sky occlusion is
    what makes the case for it: stratification alone got eight samples below
    the surface texture's own grain, but every further bounce costs another

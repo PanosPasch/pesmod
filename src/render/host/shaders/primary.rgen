@@ -176,9 +176,25 @@ void main()
     const float exposure = max(scene.params.y, 1e-3);
     vec3 color = accumulated * exposure;
 
-    // The game's colours are already in low dynamic range, so this is a
-    // gamma encode rather than a tonemap; anything stronger would crush the
-    // baked lighting the scene depends on.
+    // ── Not calibrated, and known not to be ─────────────────────────────
+    //
+    // The game is Direct3D 8 fixed function: its output is already
+    // display-referred, so encoding again here is, strictly, encoding twice.
+    // Removing it was measured against a frame where the game and this
+    // renderer sit side by side, and it is not simply better - it fixes one
+    // region and breaks two:
+    //
+    //                    game            with encode     without
+    //   pitch            76,  95,  51    157,173,138     89,110, 69
+    //   crowd            58,  52,  50     93, 92, 88     30, 29, 26
+    //   hoarding red    156,  98, 106    121,100,101     57, 41, 41
+    //
+    // Which says the error is not the encode alone. The game bakes its
+    // lighting into vertex colours and this renderer replaces that with a
+    // traced rig; the two disagree by different amounts on different
+    // surfaces, and no single curve fixes that. Calibrating the rig against
+    // the game is its own piece of work, and until it is done this stays as
+    // it is rather than trading one wrong answer for another.
     color = pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.2));
 
     imageStore(outputImage, ivec2(gl_LaunchIDEXT.xy), vec4(color, 1.0));
