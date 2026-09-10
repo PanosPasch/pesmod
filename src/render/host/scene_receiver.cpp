@@ -271,36 +271,62 @@ void SceneReceiver::HandleMessage(const uint8_t* msg, uint32_t bytes)
     }
 }
 
-uint32_t SceneReceiver::EvictUnused(uint64_t retentionFrames)
+uint32_t SceneReceiver::EvictUnused(uint64_t retentionFrames,
+                                   uint64_t budgetBytes)
 {
+    // Nothing to do until the cache is actually costing something. See the
+    // header: evicting on age alone dropped geometry the game was still
+    // using and made it pop.
+    if (m_residentBytes <= budgetBytes) return 0;
+
     const uint64_t now = m_frame.begin.frameIndex;
     if (now < retentionFrames) return 0;   // not enough history yet
     const uint64_t cutoff = now - retentionFrames;
 
-    uint32_t dropped = 0;
+    // Oldest first, so the least likely to be wanted goes first. Gathering
+    // candidates rather than erasing in place because the order matters and
+    // an unordered_map has none.
+    struct Candidate { uint64_t age; uint64_t id; bool isTexture; size_t bytes; };
+    std::vector<Candidate> candidates;
+    candidates.reserve(m_geometry.size() + m_textures.size());
 
-    for (auto it = m_geometry.begin(); it != m_geometry.end(); )
+    for (auto it = m_geometry.begin(); it != m_geometry.end(); ++it)
     {
-        if (it->second.lastUsedFrame < cutoff)
-        {
-            m_residentBytes -= (it->second.vertices.size() + it->second.indices.size());
-            it = m_geometry.erase(it);
-            ++dropped;
-            ++m_stats.geometryEvicted;
-        }
-        else ++it;
+        if (it->second.lastUsedFrame >= cutoff) continue;
+        candidates.push_back({ it->second.lastUsedFrame, it->first, false,
+                               it->second.vertices.size() + it->second.indices.size() });
+    }
+    for (auto it = m_textures.begin(); it != m_textures.end(); ++it)
+    {
+        if (it->second.lastUsedFrame >= cutoff) continue;
+        candidates.push_back({ it->second.lastUsedFrame, it->first, true,
+                               it->second.pixels.size() });
     }
 
-    for (auto it = m_textures.begin(); it != m_textures.end(); )
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Candidate& a, const Candidate& b) { return a.age < b.age; });
+
+    uint32_t dropped = 0;
+    for (size_t i = 0; i < candidates.size() && m_residentBytes > budgetBytes; ++i)
     {
-        if (it->second.lastUsedFrame < cutoff)
+        const Candidate& c = candidates[i];
+        if (c.isTexture)
         {
+            auto it = m_textures.find(c.id);
+            if (it == m_textures.end()) continue;
             m_residentBytes -= it->second.pixels.size();
-            it = m_textures.erase(it);
-            ++dropped;
+            m_textures.erase(it);
             ++m_stats.texturesEvicted;
         }
-        else ++it;
+        else
+        {
+            auto it = m_geometry.find(c.id);
+            if (it == m_geometry.end()) continue;
+            m_residentBytes -= (it->second.vertices.size() + it->second.indices.size());
+            m_geometry.erase(it);
+            ++m_stats.geometryEvicted;
+        }
+        ++dropped;
     }
 
     return dropped;

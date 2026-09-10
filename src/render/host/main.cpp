@@ -61,6 +61,8 @@ namespace
             "  --frames <n>       exit after n completed frames (0 = run until Ctrl-C)\n"
             "  --retain <frames>  drop cached geometry unused this long (default 900;\n"
             "                     must exceed the producer's 300-frame retention)\n"
+            "  --memory-budget <mb>  evict only above this much resident scene\n"
+            "                     data (default 768; 0 never evicts)\n"
             "  --quiet            only print the summary\n"
             "  --probe            create the Vulkan RT device, report, exit\n"
             "  --astest           trace a synthetic scene, self-check, exit\n"
@@ -1551,6 +1553,13 @@ int main(int argc, char** argv)
     // the producer only re-sends geometry it has forgotten, so the host must
     // never drop something the producer still believes is cached.
     uint64_t    retention = 900;
+
+    // Eviction happens under memory pressure, not on a timer. On a measured
+    // session the resident scene peaked around 120 MB, so this is headroom
+    // rather than a limit that will be reached in ordinary play - which is
+    // the point: dropping geometry the game is still using is what made it
+    // pop, and a cache that costs 120 MB has no reason to drop anything.
+    uint64_t    memoryBudgetMb = 768;
     bool        quiet = false;
     bool        probeOnly = false;
     bool        asTest = false;
@@ -1599,6 +1608,8 @@ int main(int argc, char** argv)
             maxFrames = strtoull(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--retain") && i + 1 < argc)
             retention = strtoull(argv[++i], nullptr, 10);
+        else if (!strcmp(argv[i], "--memory-budget") && i + 1 < argc)
+            memoryBudgetMb = strtoull(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--quiet")) quiet = true;
         else if (!strcmp(argv[i], "--probe")) probeOnly = true;
         else if (!strcmp(argv[i], "--astest")) asTest = true;
@@ -1765,9 +1776,11 @@ int main(int argc, char** argv)
 
         // One geometry becomes one BLAS, so an unbounded cache is an
         // unbounded number of acceleration structures, not merely wasted RAM.
-        if (retention)
+        // But it is bounded by memory now rather than by age: see
+        // SceneReceiver::EvictUnused for why age alone made the scene pop.
+        if (retention && memoryBudgetMb)
         {
-            rx.EvictUnused(retention);
+            rx.EvictUnused(retention, memoryBudgetMb * 1024ull * 1024ull);
             // Structures whose geometry has gone must go with it, or they
             // would keep GPU memory alive for meshes nothing references.
             accel.PruneOrphans(rx);

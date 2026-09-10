@@ -133,6 +133,21 @@ namespace Host
         const Geometry* FindGeometry(uint64_t id) const;
         const Texture*  FindTexture(uint64_t id) const;
 
+        // Drops cached resources, oldest first, but only while the cache is
+        // over `budgetBytes` - and never anything used within
+        // `retentionFrames`.
+        //
+        // Age alone was the rule before, and it was wrong in the way that
+        // matters: it threw things away whether or not there was any need.
+        // The game reuses its dynamic vertex buffers, so an id that has been
+        // quiet for a while is not finished with, and a live session logged
+        // "N unresolved (N evicted-then-reused)" on almost every frame -
+        // geometry dropped and immediately asked for again. On screen that is
+        // sprites and mesh pieces popping in and out one frame at a time.
+        //
+        // A resend is requested for anything missing, so the hole closes, but
+        // not before it has been seen. Not evicting until there is pressure
+        // means it does not open.
         // Drops cached resources not referenced for `retentionFrames`.
         //
         // This is not just a memory concern. One geometry is meant to become
@@ -143,7 +158,7 @@ namespace Host
         // itself a bug is a separate question the producer diagnoses.
         //
         // Returns the number of entries dropped.
-        uint32_t EvictUnused(uint64_t retentionFrames);
+        uint32_t EvictUnused(uint64_t retentionFrames, uint64_t budgetBytes);
 
         size_t GeometryCount() const { return m_geometry.size(); }
         size_t TextureCount()  const { return m_textures.size(); }
