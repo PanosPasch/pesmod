@@ -131,3 +131,8 @@ and **disabled by default** (commented out in `hooks_registry.cpp`). They
 read some additional `PESMod.ini` sections (e.g. `[stamina]`) if enabled in
 source, but those are not part of a normal build and are intentionally not
 shipped in the default `PESMod.ini`.
+
+---
+
+Part of [PESMod](../README.md), licensed under the GNU General Public
+License v3 or later. See [LICENSE](../LICENSE).

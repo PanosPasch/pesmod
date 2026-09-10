@@ -1167,3 +1167,8 @@ remains is what turns a correct image into a better one than the game's.
    what makes the case for it: stratification alone got eight samples below
    the surface texture's own grain, but every further bounce costs another
    factor, and a denoiser is what buys them back.
+
+---
+
+Part of [PESMod](../README.md), licensed under the GNU General Public
+License v3 or later. See [LICENSE](../LICENSE).
