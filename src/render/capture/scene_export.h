@@ -49,6 +49,22 @@ namespace Capture
         void BeginFrame(uint64_t frameIndex, uint32_t width, uint32_t height);
         void EndFrame();
 
+        // The game cleared the render target, so everything sent for this
+        // frame so far is not part of the picture.
+        //
+        // pes6.exe renders its player shadows first, from the light's point
+        // of view, copies the result into a texture with CopyRects and then
+        // clears and draws the visible frame. Those draws reach OnWorldDraw
+        // looking exactly like world geometry - there is no SetRenderTarget
+        // anywhere in the binary to tell them apart - and on a measured
+        // match frame they are 133 of 832 world draws, not one of which
+        // shares the camera's view-projection.
+        //
+        // Only a full-target clear counts. A depth-only clear says nothing
+        // about the colour already drawn, and a rectangle clear does not
+        // discard the whole frame.
+        void OnClearTarget();
+
         // Called for every draw the capture layer classifies as world-space.
         // `realDevice` is used to read back buffer contents when a geometry
         // slice needs uploading.

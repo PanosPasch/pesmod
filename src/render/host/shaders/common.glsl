@@ -61,7 +61,26 @@ struct InstanceRecord
     uint     flags;          // kRecordBlended
     uint     normalOffset;   // bytes to the float3 normal, or kNoVertexAttribute
     uint     colorOffset;    // bytes to the D3DCOLOR diffuse, or kNoVertexAttribute
+
+    // The affine texture-coordinate transform the game's vertex shader
+    // applied, or the identity. Two vec4s rather than six floats so std430
+    // and C++ agree without a padding argument.
+    //
+    //     .xy of uvTransform0 scales u, .zw scales v, uvTransform1.xy offsets
+    //
+    // The game windows an atlas with it - one advert out of a sheet holding
+    // every advert, one expression out of a face sheet - and sampling the
+    // raw UV instead shows the whole sheet at once.
+    vec4     uvTransform0;   // (a.x, a.y, b.x, b.y)
+    vec4     uvTransform1;   // (offset.u, offset.v, unused, unused)
 };
+
+// uv, put through the draw's own texture transform.
+vec2 TransformUv(vec4 t0, vec4 t1, vec2 uv)
+{
+    return vec2(uv.x * t0.x + uv.y * t0.z + t1.x,
+                uv.x * t0.y + uv.y * t0.w + t1.y);
+}
 
 // ── Ray masks ────────────────────────────────────────────────────────────
 //
@@ -321,9 +340,14 @@ vec2 HitUv(InstanceRecord rec, uint primitiveID, vec2 bary2)
     }
 
     const vec3 bary = vec3(1.0 - bary2.x - bary2.y, bary2.x, bary2.y);
-    return bary.x * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.x)
-         + bary.y * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.y)
-         + bary.z * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.z);
+    const vec2 raw = bary.x * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.x)
+                   + bary.y * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.y)
+                   + bary.z * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.z);
+
+    // Through the draw's transform, so an alpha-tested shadow ray tests the
+    // same texels the eye sees. A scrolling hoarding whose shadow was cut
+    // from a different part of the sheet would be worse than no transform.
+    return TransformUv(rec.uvTransform0, rec.uvTransform1, raw);
 }
 
 // Below this a texel is treated as absent rather than composited. It is

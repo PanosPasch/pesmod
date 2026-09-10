@@ -162,6 +162,12 @@ namespace Host
         // Blended instances taking coverage from the vertex colour.
         uint32_t vertexAlphaDraws;
 
+        // Instances carrying the game's own affine texture transform - the
+        // advertising hoardings and anything else windowing an atlas. Zero
+        // here with hoardings on screen means the producer is not sending
+        // it, which is a different fault from the host not applying it.
+        uint32_t uvTransformedDraws;
+
         // Build jobs dropped because another job in the same batch already
         // targeted that structure. Building one destination twice in a single
         // command is undefined and takes the device with it, so this must
@@ -263,9 +269,24 @@ namespace Host
             // layout it carries the game's own baked lighting, and folding
             // that in would light the scene twice.
             uint32_t colorOffset;
+
+            // The draw's affine texture-coordinate transform, or the
+            // identity. Two float4 rows rather than six floats so that
+            // std430 and C++ agree without a padding argument:
+            //
+            //     u' = uv.x * uvTransform0[0] + uv.y * uvTransform0[2]
+            //                                 + uvTransform1[0]
+            //     v' = uv.x * uvTransform0[1] + uv.y * uvTransform0[3]
+            //                                 + uvTransform1[1]
+            //
+            // The game's own `mad oT0.xy, v2.y, c76, (v2.x*c75.xy+c75.zw)`,
+            // which windows an atlas. Ignoring it drew every advertising
+            // hoarding as the whole sheet of adverts at once.
+            float    uvTransform0[4];
+            float    uvTransform1[4];
         };
 
-        static_assert(sizeof(InstanceRecord) == 64,
+        static_assert(sizeof(InstanceRecord) == 96,
                       "InstanceRecord must match its std430 layout in "
                       "shaders/common.glsl");
         static_assert(offsetof(InstanceRecord, baseColor)    == 32,
@@ -276,8 +297,12 @@ namespace Host
                       "InstanceRecord must match shaders/common.glsl");
         static_assert(offsetof(InstanceRecord, normalOffset) == 56,
                       "InstanceRecord must match shaders/common.glsl");
-        static_assert(offsetof(InstanceRecord, colorOffset)  == 60,
+        static_assert(offsetof(InstanceRecord, colorOffset)   == 60,
                       "InstanceRecord must match shaders/common.glsl");
+        static_assert(offsetof(InstanceRecord, uvTransform0) == 64,
+                      "vec4 is 16-byte aligned in std430");
+        static_assert(offsetof(InstanceRecord, uvTransform1) == 80,
+                      "vec4 is 16-byte aligned in std430");
 
         // ── Materials for the merged sprite batch ────────────────────
         //

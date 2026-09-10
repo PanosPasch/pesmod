@@ -175,6 +175,18 @@ HRESULT __stdcall ProxyDevice8::Clear(DWORD Count, const D3DRECT* pRects,
                                       DWORD Stencil)
 {
     if (m_captureEnabled) Frame::OnClear(Flags, Color, Z);
+
+    // A full clear of the colour target ends a pass: whatever was drawn is
+    // gone, and for this game that is how the shadow pass is separated from
+    // the visible frame. See SceneExport::OnClearTarget.
+    //
+    // Deliberately narrow. D3DCLEAR_ZBUFFER on its own says nothing about
+    // the colour already drawn, and a clear confined to rectangles does not
+    // discard the frame - treating either as a reset would throw away real
+    // geometry.
+    if ((Flags & D3DCLEAR_TARGET) != 0 && (Count == 0 || pRects == nullptr))
+        SceneExport::OnClearTarget();
+
     return m_real->Clear(Count, pRects, Flags, Color, Z, Stencil);
 }
 

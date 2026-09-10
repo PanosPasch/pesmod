@@ -1478,6 +1478,9 @@ namespace
         if (st.vertexAlphaDraws)
             printf("    coverage: %u blended draws take alpha from the "
                    "vertex colour\n", st.vertexAlphaDraws);
+        if (st.uvTransformedDraws)
+            printf("    atlas: %u draws window their texture through the "
+                   "game's own transform\n", st.uvTransformedDraws);
         if (st.blasResized)
             printf("    resized: %u structures recreated because the "
                    "driver asked for more room than they were made with\n",
@@ -1517,6 +1520,17 @@ namespace
         printf("  textures adjusted    %u X8 forced opaque, "
                "%u fully transparent, %u opaque everywhere\n",
                ts.opaqueForced, ts.fullyTransparent, ts.opaqueAlpha);
+        // The game's offscreen passes, and how much of each frame they
+        // were. Zero of these with a match on screen means the producer is
+        // not reporting the clear - a different fault from the host
+        // ignoring it, and worth being able to tell apart.
+        printf("  offscreen passes     %llu clears voided %llu instances "
+               "(%.1f per frame)\n",
+               (unsigned long long)s.framesReset,
+               (unsigned long long)s.instancesVoided,
+               s.framesCompleted
+                   ? (double)s.instancesVoided / (double)s.framesCompleted
+                   : 0.0);
         printf("  malformed messages   %llu\n",
                (unsigned long long)s.malformedMessages);
         printf("  producer dropped     %llu frames / %.1f MB\n",

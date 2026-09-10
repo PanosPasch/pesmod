@@ -18,6 +18,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <array>
 #include <vector>
 
 namespace Host
@@ -54,6 +55,18 @@ namespace Host
         // unskinned draw. Not inside InstanceDesc because its length
         // varies and every wire structure is fixed-size by design.
         std::vector<std::vector<float> >    palettes;
+
+        // One entry per instance, parallel to `instances`. The affine
+        // texture-coordinate transform the game's shader applied, or the
+        // identity when it applied none:
+        //
+        //     u' = uv.x * m[0] + uv.y * m[2] + m[4]
+        //     v' = uv.x * m[1] + uv.y * m[3] + m[5]
+        //
+        // Kept out of InstanceDesc for the same reason the palette is: the
+        // payload is optional, and the wire structures are fixed-size.
+        std::vector<std::array<float, 6> >  uvTransforms;
+
         bool                                complete;   // saw kMsgFrameEnd
         bool                                lightingValid;
     };
@@ -68,6 +81,14 @@ namespace Host
         uint64_t malformedMessages;
         uint64_t geometryEvicted;
         uint64_t texturesEvicted;
+
+        // Instances thrown away because the game cleared the colour target
+        // after drawing them. That is an offscreen pass - the shadow
+        // silhouettes this game renders from the light's point of view
+        // before copying them into a texture - and it is not part of the
+        // picture. See SceneIPC::kMsgFrameReset.
+        uint64_t framesReset;
+        uint64_t instancesVoided;
 
         // Geometry this host was asked to draw but did not have, and so
         // asked the producer to send again. Should settle to zero within a

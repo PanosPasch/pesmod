@@ -1,5 +1,6 @@
 // scene_export.cpp
 #include "scene_export.h"
+#include "shader_analysis.h"
 #include "resource_registry.h"
 #include "../d3d8/d3d8_util.h"
 #include "../ipc/shared_ring.h"
@@ -26,6 +27,10 @@ namespace
     // game's draw calls, so a per-draw allocation would show up as a stutter.
     std::vector<uint8_t> g_vertexScratch;
     std::vector<uint8_t> g_indexScratch;
+
+    // One morph delta stream at a time; reused across streams and draws so
+    // the hot path stays free of allocation once it is warm.
+    std::vector<uint8_t> g_morphScratch;
 
     // Geometry slices already uploaded, and the content hash they were
     // uploaded with. A slice whose hash changes has been re-skinned by the
@@ -157,6 +162,20 @@ namespace
     // rate means the host keeps losing geometry, which is worth knowing
     // even though the mechanism now recovers on its own.
     uint64_t g_resendHonoured = 0;
+
+    // ── What the shaders do that the exporter used to drop ───────────────
+    // Counted so a live run says whether these paths are actually being
+    // taken, rather than leaving it to be judged from a screenshot.
+    uint64_t g_morphDraws          = 0;   // draws with deltas blended in
+    uint64_t g_morphStreamsMissing = 0;   // a delta stream was not bound
+    uint64_t g_uvTransformDraws    = 0;   // draws carrying a texture transform
+    uint64_t g_uvUnrecognised      = 0;   // oT0 written by something unmodelled
+    uint64_t g_programUndecoded    = 0;   // bytecode the walk could not size
+
+    // Instances thrown away because the game cleared the target after
+    // sending them: an offscreen pass, not part of the picture.
+    uint64_t g_frameResets      = 0;
+    uint64_t g_instancesVoided  = 0;
 
     uint64_t g_skippedLayout        = 0;   // no position at 0, or too small
     uint64_t g_skippedNoDeclaration = 0;   // shader created before the hook
@@ -385,29 +404,15 @@ namespace
     const uint32_t kSm1RegTypeShift = 28u;
     const uint32_t kSm1RegTypeConst = 2u;
 
-    // Instruction length is not encoded in vs.1.1, so the scan walks tokens
-    // and counts source/destination registers per opcode. Only the arities
-    // this game's shaders actually use need to be right; anything else just
-    // has to not run away, which the bounded loop guarantees.
-    uint32_t CountPaletteTransforms(const std::vector<uint32_t>& fn)
+    // What the shader does to a vertex, decoded from its bytecode. This
+    // used to be a single loose scan counting m4x3 instructions, which was
+    // enough for skinning and blind to everything else the shaders do -
+    // the texture transform behind the advertising hoardings and the morph
+    // targets behind every player's build and expression.
+    void DescribeProgram(const std::vector<uint32_t>& fn,
+                         ShaderAnalysis::VertexShaderProgram& out)
     {
-        if (fn.size() < 2) return 0;
-
-        uint32_t count = 0;
-        for (size_t i = 1; i < fn.size(); ++i)
-        {
-            const uint32_t tok = fn[i];
-            if (tok == kSm1OpEnd) break;
-            if ((tok & 0x80000000u) != 0) continue;   // not an instruction token
-
-            if ((tok & kSm1OpcodeMask) != kSm1OpM4x3) continue;
-
-            // m4x3 dest, src0, src1 - the matrix is src1.
-            if (i + 3 >= fn.size()) break;
-            const uint32_t src1 = fn[i + 3];
-            if (((src1 >> kSm1RegTypeShift) & 0x7u) == kSm1RegTypeConst) ++count;
-        }
-        return count;
+        ShaderAnalysis::Analyse(fn, out);
     }
 
     // The two D3DCOLOR inputs a skinning declaration carries. The higher
@@ -468,6 +473,18 @@ namespace
         uint32_t boneIndexOffset;
         uint32_t boneWeightOffset;
         bool     usable;         // position at offset 0, stride large enough
+
+        // ── What the vertex shader does beyond reading stream 0 ──────────
+        // Both of these are per-shader facts that no amount of looking at
+        // the vertex buffer can reveal.
+        ShaderAnalysis::VertexShaderProgram program;
+
+        // Where each morph delta stream lives, resolved from the shader's
+        // input register through the declaration. Parallel to
+        // program.morph[]; kNoVertexAttribute for a register the declaration
+        // does not bind, which should not happen and is skipped if it does.
+        uint32_t morphStream[ShaderAnalysis::kMaxMorphTargets];
+        uint32_t morphOffset[ShaderAnalysis::kMaxMorphTargets];
     };
 
     void ClearSkin(VertexLayout& l)
@@ -475,6 +492,12 @@ namespace
         l.boneCount        = 0;
         l.boneIndexOffset  = kNoVertexAttribute;
         l.boneWeightOffset = kNoVertexAttribute;
+        memset(&l.program, 0, sizeof(l.program));
+        for (uint32_t i = 0; i < ShaderAnalysis::kMaxMorphTargets; ++i)
+        {
+            l.morphStream[i] = kNoVertexAttribute;
+            l.morphOffset[i] = kNoVertexAttribute;
+        }
     }
 
     VertexLayout DescribeFvfLayout(uint32_t fvf, uint32_t stride)
@@ -536,9 +559,27 @@ namespace
         // A skinned vertex's D3DCOLOR fields are bone data, not a diffuse
         // colour, so this has to be settled before the loop below claims one
         // as colorOffset.
-        out.boneCount = CountPaletteTransforms(vs.function);
+        DescribeProgram(vs.function, out.program);
+        out.boneCount = out.program.paletteTransforms;
         if (out.boneCount)
             FindSkinAttributes(decl, out.boneIndexOffset, out.boneWeightOffset);
+
+        // A morph delta is bound to an input register; the declaration says
+        // which stream and offset that register reads from. Resolved here
+        // rather than assumed to be "stream N for register N+2", because the
+        // mapping is the declaration's to make.
+        for (uint32_t m = 0; m < out.program.morphCount; ++m)
+        {
+            const uint32_t reg = out.program.morph[m].inputRegister;
+            for (uint32_t i = 0; i < decl.elementCount; ++i)
+            {
+                const D3D8Util::VertexDeclElement& e = decl.elements[i];
+                if (e.reg != reg || e.type != D3D8Util::kVsdtFloat3) continue;
+                out.morphStream[m] = e.stream;
+                out.morphOffset[m] = e.offset;
+                break;
+            }
+        }
 
         bool havePosition = false;
         for (uint32_t i = 0; i < decl.elementCount; ++i)
@@ -1040,6 +1081,29 @@ void Shutdown()
                 (unsigned long long)g_stats.texturesRetried,
                 (unsigned long long)g_stats.texturesContentChanged,
                 Registry::RecreatedAtSameAddress());
+
+    // What the shader bytecode turned out to be doing. Reported separately
+    // because each of these was invisible until it was counted: the whole
+    // reason players stood in a neutral pose and every hoarding showed its
+    // entire advert sheet is that nothing here was ever measured.
+    Logger::Log("[Export] Shader-driven vertex work: %llu draws with morph "
+                "targets blended (%llu delta streams unavailable), %llu draws "
+                "carrying a texture transform, %llu with an oT0 this does not "
+                "model, %llu shaders that would not decode.",
+                (unsigned long long)g_morphDraws,
+                (unsigned long long)g_morphStreamsMissing,
+                (unsigned long long)g_uvTransformDraws,
+                (unsigned long long)g_uvUnrecognised,
+                (unsigned long long)g_programUndecoded);
+
+    Logger::Log("[Export] Offscreen passes discarded: %llu mid-frame target "
+                "clears voided %llu instances (%.1f per frame) that the game "
+                "drew and then threw away.",
+                (unsigned long long)g_frameResets,
+                (unsigned long long)g_instancesVoided,
+                g_stats.framesSent
+                    ? (double)g_instancesVoided / (double)g_stats.framesSent
+                    : 0.0);
     g_ring.Close();
     g_active = false;
 }
@@ -1090,6 +1154,36 @@ void BeginFrame(uint64_t frameIndex, uint32_t width, uint32_t height)
     // camera; the authoritative per-draw transform is the WVP in each
     // instance. Where the two disagree, the instances win.
     if (!g_ring.TryWrite(kMsgFrameBegin, &fb, sizeof(fb), nullptr, 0, true))
+        ++g_stats.writeFailures;
+}
+
+void OnClearTarget()
+{
+    if (!g_active) return;
+
+    // Nothing to void, and nothing worth a message: a clear before any draw
+    // is the ordinary start of a pass.
+    if (g_instancesThisFrame == 0) return;
+
+    // The first few, in full. This rule decides which draws are in the
+    // picture at all, so if it is ever wrong the failure is a blank frame -
+    // and a blank frame with no explanation is the worst thing to debug.
+    // Five lines in the log turn that into a diagnosis: a reset firing at
+    // the very end of a frame, voiding everything, says so plainly.
+    if (g_frameResets < 5)
+        Logger::Log("[Export] Frame %llu: full target clear after %u "
+                    "instances - discarding them as an offscreen pass.",
+                    (unsigned long long)g_frameIndex, g_instancesThisFrame);
+
+    ++g_frameResets;
+    g_instancesVoided += g_instancesThisFrame;
+    g_instancesThisFrame = 0;
+
+    // Sent as a resource message, not as frame traffic. Frame traffic is
+    // droppable by design, and a dropped reset is worse than a dropped
+    // frame: the instances it was meant to void have already arrived, so
+    // losing it leaves an offscreen pass in the picture.
+    if (!g_ring.TryWrite(kMsgFrameReset, nullptr, 0, nullptr, 0, false))
         ++g_stats.writeFailures;
 }
 
@@ -1215,9 +1309,23 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
                                         : nullptr;
     if (info.indexed && !ibInfo) { ++g_stats.drawsSkipped; return; }
 
-    const uint64_t geometryId =
+    uint64_t geometryId =
         MakeGeometryId(vbInfo->id, ibInfo ? ibInfo->id : 0u, info,
                        state.baseVertexIndex, stride);
+
+    // A morphed draw's positions are stream 0 blended with other streams, so
+    // two draws sharing stream 0 and differing only in their delta buffers
+    // are different meshes. Folded in only when the shader morphs, which
+    // leaves every other draw's id byte-identical to what it has always
+    // been - including in recordings made before this existed.
+    for (uint32_t m = 0; m < layout.program.morphCount; ++m)
+    {
+        const uint32_t si = layout.morphStream[m];
+        if (si == kNoVertexAttribute || si >= D3D8_MAX_STREAMS) continue;
+        const ResourceInfo* mi = Registry::Find(state.stream[si].buffer);
+        geometryId = Mix64(geometryId, mi ? mi->id : 0u);
+    }
+    if (!geometryId) geometryId = 1ull;
 
     // ── Read back exactly the slice this draw uses ───────────────────────
     uint32_t vertexCount = 0, firstVertex = 0;
@@ -1240,6 +1348,77 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
     {
         ++g_stats.drawsSkipped;
         return;
+    }
+
+    // ── Morph targets ────────────────────────────────────────────────────
+    //
+    // The shader adds weighted deltas from streams 1..6 to stream 0's
+    // position before transforming it:
+    //
+    //     mov   r11,      v0
+    //     mad   r11.xyz,  v3, c81.x, r11
+    //     ...
+    //     m4x4  oPos,     r11, c58
+    //
+    // Applied here rather than sent for the host to apply, because the
+    // weights are the game's own and almost always static - a build morph
+    // is set once per player and never changes - so the blended positions
+    // hash identically frame to frame and upload exactly once. Sending the
+    // deltas separately would cost a payload per stream and buy nothing
+    // except for the draws whose weights genuinely animate, which are the
+    // small ones.
+    //
+    // Measured on the capture set: 110 morph draws in a match frame,
+    // sharing two distinct weight sets between them, unchanged across
+    // frames a hundred apart.
+    uint32_t morphApplied = 0;
+    if (layout.program.morphCount && stride >= 12)
+    {
+        for (uint32_t m = 0; m < layout.program.morphCount; ++m)
+        {
+            const uint32_t streamIndex = layout.morphStream[m];
+            if (streamIndex == kNoVertexAttribute ||
+                streamIndex >= D3D8_MAX_STREAMS)
+            {
+                ++g_morphStreamsMissing;
+                continue;
+            }
+
+            const StreamBinding& src = state.stream[streamIndex];
+            if (!src.buffer || src.stride < layout.morphOffset[m] + 12)
+            {
+                ++g_morphStreamsMissing;
+                continue;
+            }
+
+            const ShaderAnalysis::MorphTarget& t = layout.program.morph[m];
+            if (t.weightRegister >= kMaxVsConstants) continue;
+            const float weight =
+                state.vsConstants[t.weightRegister][t.weightComponent];
+            if (weight == 0.0f) continue;   // contributes nothing; skip the read
+
+            if (!ReadVertexRange(src.buffer, firstVertex * src.stride,
+                                 vertexCount * src.stride, g_morphScratch))
+            {
+                ++g_morphStreamsMissing;
+                continue;
+            }
+
+            uint8_t* dst = g_vertexScratch.data();
+            const uint8_t* delta = g_morphScratch.data() + layout.morphOffset[m];
+            for (uint32_t v = 0; v < vertexCount; ++v)
+            {
+                float pos[3], d[3];
+                memcpy(pos, dst + (size_t)v * stride, sizeof(pos));
+                memcpy(d,   delta + (size_t)v * src.stride, sizeof(d));
+                pos[0] += d[0] * weight;
+                pos[1] += d[1] * weight;
+                pos[2] += d[2] * weight;
+                memcpy(dst + (size_t)v * stride, pos, sizeof(pos));
+            }
+            ++morphApplied;
+        }
+        if (morphApplied) ++g_morphDraws;
     }
 
     // Read the draw's own indices, then expand whatever topology it used
@@ -1304,6 +1483,7 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
         gd.boneCount        = layout.boneCount;
         gd.boneIndexOffset  = layout.boneIndexOffset;
         gd.boneWeightOffset = layout.boneWeightOffset;
+        gd.morphTargets     = morphApplied;
 
         // Vertices and indices go as one payload, in that order, matching
         // how GeometryDesc documents the layout.
@@ -1397,6 +1577,34 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
         inst.boneIndexScale   = state.vsConstants[57][2];   // c57.z
     }
 
+    // ── The texture transform ────────────────────────────────────────────
+    // Evaluated here because only the producer knows which constants this
+    // particular shader reads: c75 is the u basis and offset in one shader
+    // and an entirely unrelated fade plane (`dp4 oD0.w, v0, c75`) in
+    // another, so the registers mean nothing without the bytecode that uses
+    // them. Appended after the palette so the palette keeps its offset.
+    if (layout.program.uvIsTransformed &&
+        layout.program.uvRegisterA < kMaxVsConstants &&
+        layout.program.uvRegisterB < kMaxVsConstants)
+    {
+        const float* a = state.vsConstants[layout.program.uvRegisterA];
+        const float* b = state.vsConstants[layout.program.uvRegisterB];
+
+        const size_t at = palette.size();
+        palette.resize(at + kUvTransformBytes);
+        memcpy(palette.data() + at,      a, sizeof(float) * 4);
+        memcpy(palette.data() + at + 16, b, sizeof(float) * 4);
+
+        inst.flags |= kInstanceUvTransform;
+        ++g_uvTransformDraws;
+    }
+    else if (layout.program.uvUnrecognised)
+    {
+        ++g_uvUnrecognised;
+    }
+    if (!layout.program.decoded && !state.VertexShaderIsFvf())
+        ++g_programUndecoded;
+
     // Stage 0 is the base map. See InstanceDesc::stageState for the packing
     // and for why it stays inside four bytes.
     inst.stageState =
@@ -1409,6 +1617,14 @@ void OnWorldDraw(IDirect3DDevice8* realDevice, const DeviceState& state,
     if (!state.renderState[D3DRS_ZWRITEENABLE])    inst.flags |= kInstanceNoDepthWrite;
     if (state.renderState[D3DRS_ALPHATESTENABLE])  inst.flags |= kInstanceAlphaTest;
     if (state.renderState[D3DRS_CULLMODE] == 1)    inst.flags |= kInstanceTwoSided;
+
+    // D3DCMP_ALWAYS is the game saying this draw goes over what is already
+    // there whatever the depth buffer holds - a stronger statement than
+    // "does not write depth", and the only thing that orders two exactly
+    // coplanar surfaces in a rasteriser. 150 of 893 world draws on a
+    // measured frame.
+    if (state.renderState[D3DRS_ZFUNC] == D3DCMP_ALWAYS)
+        inst.flags |= kInstanceDepthAlways;
     if (kind == kVertexPreLit)                     inst.flags |= kInstancePreLit;
 
     if (g_ring.TryWrite(kMsgInstance, &inst, sizeof(inst),

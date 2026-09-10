@@ -459,7 +459,78 @@ wrong and are retracted:
   mean the *fixed-function* lighting pipeline is unused — because the shaders
   do the lighting from constants instead.
 
-### 4.4 Menu rendering, for contrast
+### 4.4 What else the vertex shaders do to a vertex
+
+The transform and the lighting are not all of it. Three further things happen
+in the bytecode, each of them invisible in the vertex buffer, and each of them
+showed as a rendering bug for as long as `shader_analysis.cpp` did not exist.
+`tools/sm1dis.py` prints all three; the analyser matches the same patterns and
+agrees with it on all 50 shaders in the capture set.
+
+**The matrix palette** — `m4x3 rN, v0, c0` against the constant file. Counted
+per shader as the number of influences per vertex; 1 to 4 across the family.
+See §6.6.
+
+**An affine texture transform.**
+
+```
+mad  rN.xy,   v2.x, c75.xyyy, c75.zwww
+mad  oT0.xy,  v2.y, c76,      rN
+```
+
+which is `oT0 = uv.x * c75.xy + uv.y * c76.xy + c75.zw` — a 2×3 matrix
+spread over two constant registers. 21 of the 50 shaders carry it.
+
+Measured over a frame's 74 draws that use one of those shaders, every
+instance is a **pure offset**: the basis is exactly `(1,0)` / `(0,1)` and only
+`c75.zw` varies. It falls into two populations:
+
+| Offset | Draws | What it is |
+| ------ | ----: | ---------- |
+| exactly zero | 40 | no transform |
+| ±0.003 to ±0.013 in u, one distinct value per texture | 18 | players — a small slide into a per-player sheet |
+| 0.09–0.66 in u and/or v | 6 | one panel out of an atlas: hoardings and stand panels |
+
+With `D3DTADDRESS_WRAP`, `u + 0.664` running 0.664…1.664 wraps: that is a
+hoarding scrolling one advert across a sheet holding several. Sampling the raw
+UV instead draws the entire sheet across the board at once, which is what it
+did — visible in any traced frame as `KONAMI KONAMI KONAMI` squeezed onto one
+hoarding with a second advert stacked above it.
+
+The registers mean nothing without the bytecode that reads them: `c75` is a UV
+basis in `vs_0011` and a fog/fade plane (`dp4 oD0.w, v0, c75`) in `vs_0005`.
+So the producer evaluates the transform and sends the result — the host cannot
+work it out from constants alone.
+
+**Morph targets.**
+
+```
+mov   r11,      v0
+mad   r11.xyz,  v3, c81.x, r11      ; stream 1
+mad   r11.xyz,  v4, c81.y, r11      ; stream 2
+...
+m4x4  oPos,     r11, c58
+```
+
+Position is stream 0 plus up to eight weighted deltas from streams 1…8,
+weighted by `c81.xyzw` then `c82.xyzw` in that exact order across the whole
+shader family. 33 of the 50 shaders morph, with 1 to 8 targets each.
+
+The exporter read stream 0 and nothing else, so every player rendered in the
+shader's neutral pose. The multi-stream declarations were *seen* — they are in
+the vertex-format table above — and read as "extra `float3` data in stream 1,
+which is not a normal for stream 0's vertices", which is true and stops one
+bug while leaving this one in place.
+
+The blend is applied in the producer rather than sent for the host to apply,
+because the weights are almost always static: across 110 morph draws in a
+match frame there are **two** distinct weight sets, unchanged between frames a
+hundred apart. Blended positions therefore hash identically frame to frame and
+upload exactly once, and only a draw whose weights genuinely animate costs
+anything. Weight zero skips the buffer read entirely, so the common case is
+one extra stream read per morph draw, not six.
+
+### 4.5 Menu rendering, for contrast
 
 From a title/menu session (121 frames): 3.3 draws per frame, 65
 `SetRenderState` calls of which 50 redundant, and two screen-space FVFs —
@@ -666,6 +737,52 @@ carry `kInstanceNoDepthWrite` and the builder leaves them out of the TLAS.
 Before that rule the sky owned 98.5% of the frame; after it, the pitch,
 stands, roof and floodlights are all visible.
 
+**Draws that are not in the picture at all.** A third kind, and the largest.
+
+The game renders more than one pass per frame into the same back buffer. The
+player shadows go first, from the light's point of view; the result is copied
+into a texture and the target is then cleared and the visible frame drawn over
+it. The copy is `FUN_00873350` in `pes6.exe`:
+
+```c
+iVar1 = (**(code **)(*param_1 + 0x3c))(param_1, 0, ppiVar3);   // texture->GetSurfaceLevel(0, &surf)
+if (-1 < iVar1) {
+    (**(code **)(*DAT_00f83e68 + 0x70))(DAT_00f83e68, *this, 0, 0, ppiVar3, 0);   // device->CopyRects
+    (**(code **)(*piVar2 + 8))(piVar2);                        // surf->Release()
+}
+```
+
+`0x70` is vtable index 28, `CopyRects`. There is **no `SetRenderTarget`
+anywhere in the binary** — the game never needs one, because it renders into
+the back buffer and copies out. So nothing at the draw call distinguishes an
+offscreen pass from the real frame: same device, same target, same everything.
+
+They are visible in the shader constants, though. On match frame 2314, of 832
+world draws:
+
+| | Draws | View-projection |
+| --- | ----: | --- |
+| the visible frame | 699 | one shared perspective VP |
+| offscreen passes | 133 | six others, **none** matching the frame's |
+
+and one of those six is plainly light-space — no perspective term, a
+translation of 211 where the camera's is 2236. Those draws are 88 skinned
+player silhouettes of 123 triangles each plus 45 two-triangle quads, all with
+`ZWRITEENABLE = FALSE` and `ZFUNC = ALWAYS`, all in the first 300 draws of the
+frame.
+
+Placed by the host's factorisation they land wherever the light-space matrix
+sends them. That is the source of the floating fragments, and of shadows that
+swing around when the replay camera moves: they are not shadows, they are the
+shadow *pass*, injected into the world as geometry.
+
+The clear is what separates the passes, and it is the game's own statement
+that what has been drawn is gone. `SceneExport::OnClearTarget` sends
+`kMsgFrameReset` on a full-target clear — never on a depth-only or
+rectangle-confined one, either of which would throw away real geometry — and
+the host drops the instances it has accumulated so far. A rasteriser gets this
+for free; a ray tracer has to be told.
+
 ---
 
 ### 6.6 Recording and replay
@@ -809,6 +926,21 @@ by which point the decals are far enough off their base surface to be wrong
 in a new way. The camera position that this is measured from is recovered
 from the winning view-projection: the eye is the world point that projects
 to clip x = y = w = 0.
+
+**The counter wraps; it used to saturate.** The offset is capped so that a
+frame with hundreds of blended draws cannot accumulate a visible
+displacement, and the cap is 128 steps. Saturating there was measurably
+wrong: a match frame has around 700 blended draws out of 830, so five draws
+in six got the *same* offset and tied with their neighbours exactly — no
+separation at all for most of the pitch, which is where the z-fighting that
+survived every earlier iteration was coming from.
+
+Wrapping keeps the ordering correct inside any run of 128 consecutive blended
+draws and caps the displacement at the same 128 steps, so no tuned constant
+moves. Coplanar draws are consecutive — the pitch's layers are seven in a row
+— so a run is all that has to be ordered. The one case it does not separate
+is two coplanar draws exactly 128 apart in blended-draw order; saturating did
+that to *every* pair past the 128th.
 
 ---
 

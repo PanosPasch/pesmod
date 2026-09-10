@@ -177,6 +177,7 @@ void SceneReceiver::HandleMessage(const uint8_t* msg, uint32_t bytes)
 
         m_building.instances.clear();
         m_building.palettes.clear();
+        m_building.uvTransforms.clear();
         memcpy(&m_building.begin, body, sizeof(FrameBegin));
         m_building.lighting      = carriedLighting;
         m_building.lightingValid = carriedValid;
@@ -211,7 +212,47 @@ void SceneReceiver::HandleMessage(const uint8_t* msg, uint32_t bytes)
             p.resize(rows * 4);
             memcpy(p.data(), body + sizeof(InstanceDesc), want);
         }
+
+        // The texture transform follows the palette, so a stream recorded
+        // before this existed reads exactly as it always did: the flag is
+        // clear and the identity goes in.
+        std::array<float, 6> uv = { 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f };
+        if (inst.flags & kInstanceUvTransform)
+        {
+            const size_t at = sizeof(InstanceDesc) + want;
+            if (bodyBytes < at + kUvTransformBytes)
+            {
+                ++m_stats.malformedMessages;
+            }
+            else
+            {
+                // Two float4 rows, A then B. A.xy is the u basis and A.zw
+                // the offset; B.xy is the v basis.
+                float a[4], b[4];
+                memcpy(a, body + at,      sizeof(a));
+                memcpy(b, body + at + 16, sizeof(b));
+                uv[0] = a[0]; uv[1] = a[1];    // uv.x contribution
+                uv[2] = b[0]; uv[3] = b[1];    // uv.y contribution
+                uv[4] = a[2]; uv[5] = a[3];    // constant offset
+            }
+        }
+        m_building.uvTransforms.push_back(uv);
+
         m_building.instances.push_back(inst);
+        break;
+    }
+
+    case kMsgFrameReset:
+    {
+        // The game cleared the colour target, so everything sent for this
+        // frame so far was an offscreen pass that has already been copied
+        // away and overwritten. Dropping it here is what a rasteriser does
+        // for free; a ray tracer has to be told.
+        ++m_stats.framesReset;
+        m_stats.instancesVoided += m_building.instances.size();
+        m_building.instances.clear();
+        m_building.palettes.clear();
+        m_building.uvTransforms.clear();
         break;
     }
 

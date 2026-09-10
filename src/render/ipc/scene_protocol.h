@@ -62,7 +62,27 @@ namespace SceneIPC
         kMsgGeometry        = 4,   // vertex + index payload follows
         kMsgTexture         = 5,   // pixel payload follows
         kMsgLighting        = 6,
-        kMsgShutdown        = 7
+        kMsgShutdown        = 7,
+
+        // Everything sent for this frame so far is not part of the picture.
+        //
+        // The game renders more than one pass per frame into the same back
+        // buffer. Player shadows are drawn first, from the light's point of
+        // view, and then copied into a texture with CopyRects
+        // (pes6.exe FUN_00873350: GetSurfaceLevel(0) then device->CopyRects)
+        // before the target is cleared and the visible frame begins.
+        //
+        // Nothing distinguishes those draws at the draw call - same device,
+        // same back buffer, no SetRenderTarget anywhere in the binary - so
+        // they arrive looking exactly like world geometry, and on a measured
+        // match frame that is 133 of 832 world draws, none of which share the
+        // camera's view-projection. Placed by the host's factorisation they
+        // land wherever the light-space matrix sends them: floating fragments
+        // that swing around when the replay camera moves.
+        //
+        // The clear is what separates the passes, and it is the game's own
+        // statement that the pixels so far are gone. This carries it.
+        kMsgFrameReset      = 8
     };
 
     // Every message begins with this. `byteLength` covers the header plus its
@@ -130,7 +150,32 @@ namespace SceneIPC
         uint32_t boneCount;       // matrices blended per vertex; 0 = not skinned
         uint32_t boneIndexOffset; // D3DCOLOR, or kNoVertexAttribute
         uint32_t boneWeightOffset;// D3DCOLOR, or kNoVertexAttribute (1 bone)
-        uint32_t _pad0;
+
+        // ── Morph targets ────────────────────────────────────────────────
+        // How many delta streams the game's shader blended into the
+        // positions below:
+        //
+        //     mov   r11,      v0
+        //     mad   r11.xyz,  v3, c81.x, r11      ; stream 1
+        //     mad   r11.xyz,  v4, c81.y, r11      ; stream 2
+        //     ...
+        //     m4x4  oPos,     r11, c58
+        //
+        // This is how the game shapes a player's build and moves their face.
+        // The deltas live in streams 1..6, which the exporter used to ignore
+        // entirely - it reads stream 0 and nothing else - so every player
+        // rendered in the shader's neutral pose.
+        //
+        // The blend happens in the producer and the positions above are the
+        // result, so a consumer needs nothing from this beyond a record of
+        // what was applied. It is worth reporting because it is measurable:
+        // the weights are static for a build morph and change for an
+        // expression, and which of those a draw is decides whether the
+        // geometry re-uploads.
+        //
+        // Zero in anything captured before morph blending existed, which is
+        // exactly what it means: no deltas applied.
+        uint32_t morphTargets;
         // Payload follows: vertexCount*vertexStride bytes, then
         // indexCount*indexStride bytes, each padded to 8 bytes.
     };
@@ -279,8 +324,38 @@ namespace SceneIPC
         // On a measured match frame this covers 37 of 405 world draws and 242
         // of 21,441 triangles: the sky dome plus two-triangle overlay
         // sprites. Nothing that should be traced.
-        kInstanceNoDepthWrite = 1u << 6
+        kInstanceNoDepthWrite = 1u << 6,
+
+        // The instance payload carries a texture transform after the bone
+        // palette: two float4 rows, A then B, applied as
+        //
+        //     u' = uv.x * A.x + uv.y * B.x + A.z
+        //     v' = uv.x * A.y + uv.y * B.y + A.w
+        //
+        // which is the game's own
+        //
+        //     mad  rN.xy,  v2.x, c75.xyyy, c75.zwww
+        //     mad  oT0.xy, v2.y, c76,      rN
+        //
+        // with A = c75 and B = c76. It windows an atlas: the advertising
+        // hoardings scroll by animating these registers over a sheet holding
+        // every advert at once. Sampling the raw UV instead draws the whole
+        // sheet across the hoarding, which is what it did.
+        //
+        // After the palette rather than before it, so that the palette stays
+        // at the offset it has always been at and a recording made before
+        // this flag existed still reads correctly.
+        kInstanceUvTransform  = 1u << 7,
+
+        // Drawn with D3DRS_ZFUNC = D3DCMP_ALWAYS: the game's statement that
+        // this draw goes over whatever is already there, whatever the depth
+        // says. Distinct from kInstanceNoDepthWrite, which only says it must
+        // not occlude what comes after.
+        kInstanceDepthAlways  = 1u << 8
     };
+
+    // The texture transform's payload, when kInstanceUvTransform is set.
+    static const uint32_t kUvTransformBytes = 32;   // two float4 rows
 
     // The game's own lighting rig, read from vertex shader constants rather
     // than invented — see docs/RENDERER.md §4.3.

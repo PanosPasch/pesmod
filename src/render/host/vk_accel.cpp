@@ -136,11 +136,37 @@ namespace
     // 1e-5; at 1e-4 it rises again to 11.6, because by then the decals are
     // far enough off their base surface to be wrong in a new way.
 
-    // Steps are capped so a frame with hundreds of blended draws cannot
-    // accumulate a visible displacement. Coplanar decals are consecutive in
-    // draw order - the pitch's are seven in a row - so the cap costs nothing
-    // that matters.
+    // How far the ordering runs before it starts over.
+    //
+    // A frame with hundreds of blended draws must not accumulate a visible
+    // displacement, so the offset cannot grow without bound. It used to
+    // saturate here, which was measurably wrong: a match frame has around
+    // 700 blended draws out of 830, so every one of them past the 128th got
+    // the same offset and tied with its neighbours exactly - no separation
+    // at all for five draws in six, which is most of the pitch.
+    //
+    // Wrapping instead keeps the ordering correct inside any run of 128
+    // consecutive blended draws while capping the displacement at the same
+    // 128 steps. Coplanar draws are consecutive - the pitch's layers are
+    // seven in a row - so a run is all that has to be ordered.
+    //
+    // The one case it does not separate is two coplanar draws exactly 128
+    // apart in blended-draw order, where the later one lands behind the
+    // earlier. That is what saturating did to every pair past the 128th, so
+    // it is strictly the rarer failure, and no tuned constant moves.
     const uint32_t kMaxDecalSteps = 128;
+
+    // The identity texture transform. A record is memset to zero before it
+    // is filled, and an all-zero transform maps every UV onto one texel -
+    // so this is not a nicety, it is what stops an untransformed draw
+    // sampling a single pixel of its texture.
+    inline void SetIdentityUv(Host::AccelBuilder::InstanceRecord& rec)
+    {
+        rec.uvTransform0[0] = 1.0f; rec.uvTransform0[1] = 0.0f;
+        rec.uvTransform0[2] = 0.0f; rec.uvTransform0[3] = 1.0f;
+        rec.uvTransform1[0] = 0.0f; rec.uvTransform1[1] = 0.0f;
+        rec.uvTransform1[2] = 0.0f; rec.uvTransform1[3] = 0.0f;
+    }
 
     inline bool IsBlended(const SceneIPC::InstanceDesc& inst)
     {
@@ -1181,6 +1207,22 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
         // is not the TLAS index.
         InstanceRecord rec;
         memset(&rec, 0, sizeof(rec));
+        SetIdentityUv(rec);
+
+        // The draw's own texture transform, when its shader had one. The
+        // producer evaluates it, because which constant registers a shader
+        // reads is a property of its bytecode - c75 is a UV basis in one
+        // shader and a fog plane in another.
+        if ((inst.flags & kInstanceUvTransform) != 0 &&
+            i < frame.uvTransforms.size())
+        {
+            const std::array<float, 6>& t = frame.uvTransforms[i];
+            rec.uvTransform0[0] = t[0]; rec.uvTransform0[1] = t[1];
+            rec.uvTransform0[2] = t[2]; rec.uvTransform0[3] = t[3];
+            rec.uvTransform1[0] = t[4]; rec.uvTransform1[1] = t[5];
+            ++m_stats.uvTransformedDraws;
+        }
+
         rec.vertexAddress = blas.vertices.address;
         rec.indexAddress  = blas.indices.IsValid() ? blas.indices.address : 0;
         rec.vertexStride  = geo->desc.vertexStride;
@@ -1249,8 +1291,7 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
             const float len = sqrtf(dx*dx + dy*dy + dz*dz);
             if (len > 1e-3f)
             {
-                const uint32_t steps = decalOrder < kMaxDecalSteps
-                                     ? decalOrder : kMaxDecalSteps;
+                const uint32_t steps = decalOrder % kMaxDecalSteps;
                 const float step = (float)steps * kDecalBias * len;
                 world.m[12] += dx / len * step;
                 world.m[13] += dy / len * step;
@@ -1304,6 +1345,7 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
         // instead of out of the record.
         InstanceRecord rec;
         memset(&rec, 0, sizeof(rec));
+        SetIdentityUv(rec);
         rec.textureSlot  = kWhiteTextureSlot;
         rec.samplerIndex = 0;
         rec.uvOffset     = SceneIPC::kNoVertexAttribute;

@@ -90,9 +90,14 @@ void main()
     {
         FloatData verts = FloatData(rec.vertexAddress);
 
-        const vec2 uv = bary.x * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.x)
-                      + bary.y * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.y)
-                      + bary.z * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.z);
+        const vec2 rawUv = bary.x * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.x)
+                         + bary.y * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.y)
+                         + bary.z * VertexUv(verts, rec.vertexStride, rec.uvOffset, tri.z);
+
+        // The draw's own texture transform. Identity for most draws, which
+        // costs two multiplies and an add; for the rest it is the difference
+        // between one advert and the whole sheet.
+        const vec2 uv = TransformUv(rec.uvTransform0, rec.uvTransform1, rawUv);
 
         // LOD 0 rather than an implicit level: a ray tracing stage has no
         // derivatives. It is sharp and will alias in the distance; choosing
