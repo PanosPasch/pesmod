@@ -184,12 +184,26 @@ template for the same format is in
 ## Credits
 
 - [MinHook](https://github.com/TsudaKageyu/minhook) by Tsuda Kageyu —
-  vendored under `include/MinHook/`, licensed BSD-2-Clause (see the header
-  in [`MinHook.h`](include/MinHook/include/MinHook.h)).
+  vendored under `include/MinHook/`, licensed BSD-2-Clause (see
+  [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)).
 - The PES/WE modding community for documenting the game's data formats.
 
 ## License
 
-PESMod's own code is released into the public domain under
-[The Unlicense](LICENSE). Do whatever you like with it. The vendored
-MinHook library keeps its own BSD-2-Clause license.
+PESMod is free software, licensed under the
+**GNU General Public License, version 3 or later** (see [LICENSE](LICENSE)).
+
+You are free to use, study, modify and redistribute it. In return, the GPL
+requires that if you distribute PESMod — modified or not, in source or in
+binary form — you pass on the same freedoms: ship the complete corresponding
+source code, keep it under the GPLv3, and keep the copyright and license
+notices intact. In short, forks and derivatives must stay open source.
+
+Every source file under `src/` and `tools/`, plus `CMakeLists.txt`, carries an
+`SPDX-License-Identifier: GPL-3.0-or-later` header. Bundled and depended-upon
+third-party components keep their own licenses; they are listed in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+The GPL covers PESMod's *code*. It does not cover the `.ini` files, kits,
+logos or other content you author for your own install — those are yours, and
+the examples in `samples/` are provided as templates you may copy freely.

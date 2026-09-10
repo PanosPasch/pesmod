@@ -41,3 +41,16 @@ src/
 ├─ parser.js       UI BIN parser (root, textures, sections, records)
 └─ styles.css
 ```
+
+## License
+
+ui-bin-viewer is part of the [PESMod](https://github.com/PanosPasch/pesmod)
+project and is free software, licensed under the **GNU General Public License,
+version 3 or later** (see [LICENSE](LICENSE)).
+
+You are free to use, study, modify and redistribute it, provided that anything
+you distribute stays under the GPLv3 with its complete corresponding source
+code and its copyright and license notices intact.
+
+React, three.js and Vite are pulled in from npm at build time and keep their
+own MIT licenses.

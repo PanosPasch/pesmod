@@ -168,3 +168,8 @@ The full structure is captured as an
 the [`tools/ui-bin-viewer/`](../tools/ui-bin-viewer) web app parses and
 renders the same format for visual inspection. The league-selection panel
 binds one such rich layout (resource id `0x10385`) as its asset bank.
+
+---
+
+Part of [PESMod](../README.md), licensed under the GNU General Public
+License v3 or later. See [LICENSE](../LICENSE).
