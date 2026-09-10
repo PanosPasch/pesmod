@@ -227,9 +227,23 @@ void main()
         // every occlusion ray outside the geometry entirely and quietly
         // report that nothing occludes anything.
         const float aoBias = max(gl_HitTEXT * 2.0e-4, 1.0e-4);
-        uint rng = HashCombine(HashCombine(gl_LaunchIDEXT.x * 1973u,
-                                           gl_LaunchIDEXT.y * 9277u),
-                               uint(gl_PrimitiveID) * 26699u);
+        // Seeded on where the hit is in the world, not on which pixel it
+        // landed in.
+        //
+        // A screen-space seed makes the sample pattern belong to the screen:
+        // hold the scene still and orbit the camera - which is exactly what
+        // the game's replay mode does - and the occlusion crawls across
+        // every surface, which reads as the shadows themselves moving. A
+        // world-space seed pins the pattern to the surface, so it sits still
+        // under a moving camera and reads as grain in the material.
+        //
+        // Quantised to a fraction of the ray reach so that neighbouring
+        // pixels on one surface still differ, while the same point keeps its
+        // directions from frame to frame.
+        const vec3 cell = floor(hitPos / max(reach * 0.02, 1.0e-3));
+        uint rng = HashCombine(HashCombine(uint(int(cell.x)) * 73856093u,
+                                           uint(int(cell.y)) * 19349663u),
+                               uint(int(cell.z)) * 83492791u);
 
         // Stratified, not independent: the samples are spread one per cell
         // of a regular grid over the unit square and jittered inside it,

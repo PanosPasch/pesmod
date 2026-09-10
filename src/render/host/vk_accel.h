@@ -373,12 +373,26 @@ namespace Host
             uint32_t contentHash;
         };
 
-        // Whether this draw is the sky: its box, in world space, contains the
-        // camera. Nothing else in the scene does - the stadium surrounds the
-        // pitch but not the camera, which sits above and behind it - and a
-        // surface enclosing the viewer would occlude everything else if it
-        // were traced normally.
-        bool EnclosesCamera(const Geometry& geo, const Math::Mat4& world);
+        // Whether this draw is the game's sky.
+        //
+        // Two shapes have to be recognised, and a single test does not catch
+        // both. Some stadiums draw a box around the camera; others draw a
+        // cap overhead plus a ring around the horizon, and that ring's lower
+        // edge can sit slightly above the camera - thirty-two units, in one
+        // measured frame - so a containment test misses it entirely and the
+        // sky ends up lit like a wall.
+        //
+        // So: the draw's world bounds either contain the camera outright, or
+        // lie wholly overhead while surrounding it horizontally. "Overhead"
+        // is along the game's own up axis, taken from the hemisphere axis it
+        // publishes in c93 rather than assumed.
+        //
+        // Both halves are needed. Wholly overhead alone would sweep up a
+        // floodlight glow; surrounding alone would sweep up the pitch, which
+        // surrounds the camera horizontally and is the last thing that should
+        // stop being traced.
+        bool LooksLikeSky(const Geometry& geo, const Math::Mat4& world,
+                          const float upAxis[3]);
 
         // `palette` is the instance's bone pose, or null for a rigid mesh.
         // Skinning happens during the copy into the BLAS buffer, since that

@@ -256,7 +256,8 @@ bool AccelBuilder::EnsureScratch(VkDeviceSize bytes)
     return true;
 }
 
-bool AccelBuilder::EnclosesCamera(const Geometry& geo, const Math::Mat4& world)
+bool AccelBuilder::LooksLikeSky(const Geometry& geo, const Math::Mat4& world,
+                                const float upAxis[3])
 {
     if (!m_haveCameraPos) return false;
 
@@ -312,8 +313,34 @@ bool AccelBuilder::EnclosesCamera(const Geometry& geo, const Math::Mat4& world)
     }
 
     const float eye[3] = { m_cameraPos.x, m_cameraPos.y, m_cameraPos.z };
+
+    // A box around the camera: the simple case, and enough on its own.
+    bool contains = true;
     for (int k = 0; k < 3; ++k)
+        if (eye[k] < lo[k] || eye[k] > hi[k]) contains = false;
+    if (contains) return true;
+
+    // Otherwise: which axis is up, and which way along it. The game's own
+    // hemisphere axis says, so this does not assume a handedness.
+    int up = 1;
+    for (int k = 0; k < 3; ++k)
+        if (fabsf(upAxis[k]) > fabsf(upAxis[up])) up = k;
+    if (fabsf(upAxis[up]) < 0.5f) return false;      // no usable up axis
+    const float sign = upAxis[up] < 0.0f ? -1.0f : 1.0f;
+
+    // Wholly overhead: every corner of the box further along up than the
+    // camera is. A surface that dips below the viewer is part of the scene.
+    const float nearEdge = (sign > 0.0f) ? lo[up] : hi[up];
+    if ((nearEdge - eye[up]) * sign <= 0.0f) return false;
+
+    // And surrounding: the camera inside the box on both other axes. This
+    // is what separates a sky ring from a floodlight glow hanging in one
+    // corner of it.
+    for (int k = 0; k < 3; ++k)
+    {
+        if (k == up) continue;
         if (eye[k] < lo[k] || eye[k] > hi[k]) return false;
+    }
     return true;
 }
 
@@ -941,6 +968,21 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
     // How many blended instances have been emitted so far this frame. Their
     // order is the game's draw order, which is what decides which decal sits
     // on top of which.
+    // Which way is up, for the sky test. Taken from the hemisphere axis the
+    // game publishes in c93 rather than assumed: it is the game's own
+    // statement of the vertical, and it is already being carried across
+    // frames because the producer only resends the rig when it changes.
+    //
+    // Before the first lit draw of a session there is no rig, and the
+    // fallback is the axis this game actually uses.
+    float skyUp[3] = { 0.0f, -1.0f, 0.0f };
+    if (frame.lightingValid)
+    {
+        skyUp[0] = frame.lighting.hemisphereAxis[0];
+        skyUp[1] = frame.lighting.hemisphereAxis[1];
+        skyUp[2] = frame.lighting.hemisphereAxis[2];
+    }
+
     uint32_t decalOrder = 0;
 
     std::vector<InstanceRecord> records;
@@ -997,7 +1039,18 @@ bool AccelBuilder::BuildFrame(const SceneReceiver& scene,
         // some of what it swept out of the scene are opaque layers that
         // genuinely darken the pitch. "Opaque and told not to occlude" is
         // not the same statement as "backdrop", and this game makes both.
-        const bool isSky = nonOccluding && EnclosesCamera(*geo, world);
+        // Opaque as well as overhead. The sky this game draws is opaque -
+        // it is the backdrop everything else is painted over - while the
+        // blended things that hang overhead are floodlight glow and haze,
+        // which belong in the scene and tint what is under them. Moving
+        // those to the sky mask lightened the pitch from rgb(129,134,106) to
+        // rgb(157,173,138) against the game's own rgb(76,95,51).
+        //
+        // Opacity alone is not enough either, and was tried: it sweeps up
+        // opaque non-occluding layers lying on the pitch, which is the same
+        // failure from the other direction. It takes both.
+        const bool isSky = nonOccluding && !IsBlended(inst) &&
+                           LooksLikeSky(*geo, world, skyUp);
         if (isSky) ++m_stats.skyDraws;
 
         const uint32_t rayMask = isSky ? (uint32_t)kMaskSky
