@@ -188,6 +188,13 @@ namespace Host
         void CollectDirtyTextures(std::vector<uint64_t>& out, uint32_t max) const;
         void MarkTextureClean(uint64_t textureId);
 
+        // Puts a texture back in the upload queue. The cache calls this
+        // when it takes a slot back: the pixels are still here, but the
+        // GPU copy has gone, and without this the texture would simply
+        // never return - every surface using it sampling white for the
+        // rest of the session.
+        void MarkTextureDirty(uint64_t textureId);
+
     private:
         void HandleMessage(const uint8_t* msg, uint32_t bytes);
         bool ReadReplayMessage(uint32_t& outBytes);

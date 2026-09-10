@@ -92,7 +92,8 @@ namespace Host
         // here is what made the live pitch's missing texture take a screen
         // recording to notice.
         uint32_t skippedFormat;     // nothing here can decode it
-        uint32_t skippedFull;       // cache is at capacity
+        uint32_t skippedFull;       // full, and nothing older to reclaim
+        uint32_t slotsReclaimed;    // taken from the least recently used
         uint32_t opaqueAlpha;       // alpha is 255 everywhere: no coverage
         uint32_t opaqueForced;      // X8R8G8B8: alpha byte is not alpha
         uint32_t fullyTransparent;  // alpha zero everywhere; drawn as nothing
@@ -164,6 +165,24 @@ namespace Host
 
         std::vector<Image>                     m_images;
         std::unordered_map<uint64_t, uint32_t> m_slotOf;
+
+        // Which texture each slot holds, and when it was last asked for.
+        //
+        // Slots used to be handed out and never taken back, which was fine
+        // while a session sent three hundred textures. It stopped being fine
+        // when the producer started giving a recreated texture a new id
+        // rather than a dead one's: a session now sends around fifteen
+        // hundred, and the two thousand slots would run out partway through
+        // a third match. What that looks like on screen is surfaces sampling
+        // white - which is indistinguishable from the bug that made the
+        // producer send them in the first place.
+        std::vector<uint64_t>                  m_slotTexture;
+        mutable std::vector<uint64_t>          m_slotLastUsed;
+        uint64_t                               m_useClock;
+
+        // The clock value for the frame being assembled, so a slot touched
+        // this frame is never chosen as a victim.
+        uint64_t                               m_frameClock;
 
         // Texture ids whose alpha channel is 255 everywhere.
         std::unordered_map<uint64_t, bool> m_carriesAlpha;

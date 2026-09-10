@@ -1512,6 +1512,8 @@ namespace
                ts.bytesResident / (1024.0 * 1024.0));
         printf("  textures not shown   %u undecodable, %u past capacity\n",
                ts.skippedFormat, ts.skippedFull);
+        printf("  texture slots        %u reclaimed from the least "
+               "recently used\n", ts.slotsReclaimed);
         printf("  textures adjusted    %u X8 forced opaque, "
                "%u fully transparent, %u opaque everywhere\n",
                ts.opaqueForced, ts.fullyTransparent, ts.opaqueAlpha);

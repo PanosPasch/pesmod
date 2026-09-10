@@ -10,7 +10,12 @@ namespace
     // Enough for a match with room to spare: the busiest capture held 361
     // live textures. The array is fully populated with the white texture, so
     // this is a real memory cost of one descriptor each, not of one image.
-    const uint32_t kCapacity = 2048;
+    // Sized so that reclamation is a safety net rather than the normal
+    // case. A two-match session sends around fifteen hundred textures now
+    // that a recreated texture gets its own id, and thrashing a full
+    // cache costs visibly: with 282 textures in 200 slots, 0.14% of the
+    // frame samples white while reclaimed textures queue to come back.
+    const uint32_t kCapacity = 4096;
 
     // The size of one mip of the image the cache keeps, which is always
     // B8G8R8A8 whatever the game sent.
@@ -352,6 +357,7 @@ uint32_t SamplerIndexForAddress(uint32_t packedAddress)
 
 TextureCache::TextureCache()
     : m_device(nullptr), m_alloc(nullptr), m_commandPool(VK_NULL_HANDLE)
+    , m_useClock(0), m_frameClock(0)
     , m_lastUploadCarriesAlpha(false)
 {
     for (uint32_t i = 0; i < kSamplerCount; ++i) m_samplers[i] = VK_NULL_HANDLE;
@@ -416,6 +422,8 @@ bool TextureCache::Init(VulkanDevice* device, GpuAllocator* allocator)
 
     m_images.resize(kCapacity);
     m_descriptors.resize(kCapacity);
+    m_slotTexture.assign(kCapacity, 0);
+    m_slotLastUsed.assign(kCapacity, 0);
 
     if (!CreateWhiteTexture()) return false;
 
@@ -681,6 +689,11 @@ bool TextureCache::UploadImage(const SceneIPC::TextureDesc& desc,
 void TextureCache::Sync(SceneReceiver& scene, uint32_t budget)
 {
     m_stats.uploadedThisFrame = 0;
+
+    // One tick per frame, so "least recently used" means least recently
+    // asked for by a draw rather than least recently uploaded.
+    ++m_useClock;
+    m_frameClock = m_useClock;
     if (!budget) return;
 
     std::vector<uint64_t> dirty;
@@ -711,13 +724,48 @@ void TextureCache::Sync(SceneReceiver& scene, uint32_t budget)
         }
         else
         {
-            if (m_stats.resident >= Capacity())
+            if (m_stats.resident < Capacity())
             {
-                ++m_stats.skippedFull;
-                scene.MarkTextureClean(dirty[i]);
-                continue;
+                slot = m_stats.resident++;
             }
-            slot = m_stats.resident++;
+            else
+            {
+                // Full: take the slot nobody has asked for in longest.
+                // Never the white slot, and never one used this frame - a
+                // texture the frame being built still needs must not be
+                // pulled out from under it.
+                uint32_t victim = Capacity();
+                uint64_t oldest  = UINT64_MAX;
+                for (uint32_t i = kWhiteTextureSlot + 1; i < Capacity(); ++i)
+                {
+                    if (m_slotLastUsed[i] >= m_frameClock) continue;
+                    if (m_slotLastUsed[i] < oldest)
+                    {
+                        oldest = m_slotLastUsed[i];
+                        victim = i;
+                    }
+                }
+
+                if (victim >= Capacity())
+                {
+                    // Every slot is in use this frame. Nothing to take.
+                    ++m_stats.skippedFull;
+                    scene.MarkTextureClean(dirty[i]);
+                    continue;
+                }
+
+                // The pixels are still in the receiver; only the GPU copy
+                // goes. Putting it back in the queue is what lets the
+                // texture return if a later frame wants it again - without
+                // this a reclaimed texture is white forever.
+                scene.MarkTextureDirty(m_slotTexture[victim]);
+                m_slotOf.erase(m_slotTexture[victim]);
+                m_carriesAlpha.erase(m_slotTexture[victim]);
+                DestroyImage(m_images[victim]);
+                m_descriptors[victim] = m_descriptors[kWhiteTextureSlot];
+                slot = victim;
+                ++m_stats.slotsReclaimed;
+            }
             m_slotOf[dirty[i]] = slot;
         }
 
@@ -730,6 +778,9 @@ void TextureCache::Sync(SceneReceiver& scene, uint32_t budget)
             if (slot + 1 == m_stats.resident) --m_stats.resident;
             continue;
         }
+
+        m_slotTexture[slot]  = dirty[i];
+        m_slotLastUsed[slot] = m_useClock;
 
         m_descriptors[slot].sampler     = VK_NULL_HANDLE;
         m_descriptors[slot].imageView   = m_images[slot].view;
@@ -744,7 +795,12 @@ void TextureCache::Sync(SceneReceiver& scene, uint32_t budget)
 uint32_t TextureCache::Slot(uint64_t textureId) const
 {
     auto it = m_slotOf.find(textureId);
-    return (it == m_slotOf.end()) ? kWhiteTextureSlot : it->second;
+    if (it == m_slotOf.end()) return kWhiteTextureSlot;
+
+    // Asking for a slot is what keeps it alive; the builder asks once per
+    // instance while assembling a frame.
+    m_slotLastUsed[it->second] = m_useClock;
+    return it->second;
 }
 
 bool TextureCache::TextureCarriesAlpha(uint64_t textureId) const
